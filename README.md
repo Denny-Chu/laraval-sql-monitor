@@ -44,7 +44,7 @@
 ### 安裝
 
 ```bash
-composer require your-vendor/laravel-sql-monitor
+composer require denny-chu/laravel-sql-monitor
 
 # 發布配置和視圖
 php artisan vendor:publish --provider="LaravelSqlMonitor\SqlMonitorServiceProvider"
