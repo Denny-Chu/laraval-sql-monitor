@@ -20,6 +20,7 @@ use LaravelSqlMonitor\Monitor\LiveQueryMonitor;
 use LaravelSqlMonitor\Monitor\MetricsCollector;
 use LaravelSqlMonitor\Storage\Contracts\QueryStoreInterface;
 use LaravelSqlMonitor\Storage\SqliteQueryStore;
+use LaravelSqlMonitor\Console\Commands\AnalyseQueries;
 use LaravelSqlMonitor\Console\Commands\CleanupQueryLogs;
 use LaravelSqlMonitor\Console\Commands\ExportQueryLogs;
 
@@ -168,6 +169,7 @@ class SqlMonitorServiceProvider extends ServiceProvider
     {
         if ($this->app->runningInConsole()) {
             $this->commands([
+                AnalyseQueries::class,
                 CleanupQueryLogs::class,
                 ExportQueryLogs::class,
             ]);
