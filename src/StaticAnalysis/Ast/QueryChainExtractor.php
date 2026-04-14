@@ -177,6 +177,10 @@ class QueryChainExtractor
         $callSite->startLine   = $root->getStartLine();
         $callSite->endLine     = $node->getEndLine();
 
+        if ($rootType === 'eloquent') {
+            $this->classifyCall($callSite, $rootMethod, $callSite->rootArgs, $root->getStartLine());
+        }
+
         // 反轉：從內到外，依方法鏈順序處理
         $chainNodes = array_reverse(array_slice($calls, 0, -1));
 
@@ -204,15 +208,6 @@ class QueryChainExtractor
 
             // 分類記錄
             $this->classifyCall($callSite, $method, $args, $callNode->getStartLine());
-        }
-
-        // 最外層方法通常是終止方法
-        if ($node instanceof MethodCall) {
-            $outerMethod = $node->name instanceof Identifier ? $node->name->toString() : null;
-
-            if ($outerMethod && in_array($outerMethod, self::TERMINAL_METHODS, true)) {
-                $callSite->terminalMethod = $outerMethod;
-            }
         }
 
         return $callSite;
@@ -282,13 +277,19 @@ class QueryChainExtractor
         }
 
         if (in_array($method, ['select', 'addSelect', 'selectRaw'], true)) {
-            foreach ($args as $arg) {
-                if (is_string($arg)) {
-                    $site->selects[] = $arg;
-                } elseif (is_array($arg)) {
-                    $site->selects = array_merge($site->selects, $arg);
-                }
-            }
+            $this->recordSelectArguments($site, $args);
+        }
+
+        if (in_array($method, ['get', 'first', 'firstOrFail', 'sole'], true) && array_key_exists(0, $args)) {
+            $this->recordSelectArguments($site, [$args[0]]);
+        }
+
+        if (in_array($method, ['find', 'findOrFail'], true) && array_key_exists(1, $args)) {
+            $this->recordSelectArguments($site, [$args[1]]);
+        }
+
+        if (in_array($method, ['paginate', 'simplePaginate', 'cursorPaginate'], true) && array_key_exists(1, $args)) {
+            $this->recordSelectArguments($site, [$args[1]]);
         }
 
         if (in_array($method, ['orderBy', 'orderByDesc', 'orderByRaw', 'latest', 'oldest'], true)) {
@@ -305,6 +306,10 @@ class QueryChainExtractor
 
         if (in_array($method, ['union', 'unionAll'], true)) {
             $site->hasUnion = true;
+        }
+
+        if ($site->terminalMethod === null && in_array($method, self::TERMINAL_METHODS, true)) {
+            $site->terminalMethod = $method;
         }
     }
 
@@ -391,6 +396,24 @@ class QueryChainExtractor
 
             default => null,
         };
+    }
+
+    private function recordSelectArguments(QueryCallSite $site, array $args): void
+    {
+        foreach ($args as $arg) {
+            if (is_string($arg)) {
+                $site->selects[] = $arg;
+                continue;
+            }
+
+            if (is_array($arg)) {
+                foreach ($arg as $value) {
+                    if (is_string($value)) {
+                        $site->selects[] = $value;
+                    }
+                }
+            }
+        }
     }
 
     private function extractArray(Node\Expr\Array_ $node): array

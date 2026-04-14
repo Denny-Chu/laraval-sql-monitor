@@ -116,4 +116,40 @@ PHP;
         $this->assertNotContains('select-star', $issueCodes);
         $this->assertNotContains('no-where', $issueCodes);
     }
+
+    public function testTreatsRootWhereHasAndGetColumnsAsRealConstraints(): void
+    {
+        $source = <<<'PHP'
+<?php
+
+class UserPermissionRouteRepository
+{
+    public function getModulePermissionRouteArray(array $moduleIds): array
+    {
+        return UserPermissionRoute::whereHas('userPermission', function ($q) use ($moduleIds) {
+                $q->whereIn('user_module_id', $moduleIds);
+            })
+            ->get(['classname', 'method'])
+            ->map(fn ($route) => $route->classname . '@' . $route->method)
+            ->mapWithKeys(fn ($key) => [$key => true])
+            ->toArray();
+    }
+}
+PHP;
+
+        $sites = (new AstAnalyser())->analyseSource($source, 'UserPermissionRouteRepository.php');
+
+        $this->assertCount(1, $sites);
+        $this->assertSame('whereHas', $sites[0]->rootMethod);
+
+        $report = (new CallSiteAnalyser())->analyse($sites[0]);
+        $issueCodes = array_column($report->issues, 'code');
+
+        $this->assertSame(['classname', 'method'], $sites[0]->selects);
+        $this->assertSame('get', $sites[0]->terminalMethod);
+        $this->assertNotEmpty($sites[0]->wheres);
+        $this->assertSame('whereHas', $sites[0]->wheres[0]['method']);
+        $this->assertNotContains('select-star', $issueCodes);
+        $this->assertNotContains('no-where', $issueCodes);
+    }
 }
