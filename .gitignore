@@ -1,0 +1,28 @@
+# Dependencies
+/vendor/
+
+# Composer
+composer.lock
+
+# PHPUnit
+.phpunit.result.cache
+.phpunit.cache/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Local workflow scripts & plans (not for public repo)
+/scripts/
+/WORKFLOW_PLAN.md
+
+# Internal documents (not for public repo)
+/FILE_MANIFEST.md
+/LESSONS_LEARNED.md
+/docs/
