@@ -1,7 +1,7 @@
 {
     "name": "denny/laravel-sql-monitor",
     "description": "A comprehensive SQL query monitoring and analysis tool for Laravel development environments",
-    "keywords": ["laravel", "sql", "monitor", "query", "n+1", "performance", "debug"],
+    "keywords": ["laravel", "sql", "monitor", "query", "performance", "debug"],
     "license": "MIT",
     "type": "library",
     "require": {
