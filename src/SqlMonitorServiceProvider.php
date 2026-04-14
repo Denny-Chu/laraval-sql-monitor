@@ -18,7 +18,9 @@ use LaravelSqlMonitor\Lifecycle\DuplicateQueryDetector;
 use LaravelSqlMonitor\Monitor\SlowQueryTracker;
 use LaravelSqlMonitor\Monitor\LiveQueryMonitor;
 use LaravelSqlMonitor\Monitor\MetricsCollector;
+use LaravelSqlMonitor\Exceptions\MonitorException;
 use LaravelSqlMonitor\Storage\Contracts\QueryStoreInterface;
+use LaravelSqlMonitor\Storage\DatabaseQueryStore;
 use LaravelSqlMonitor\Storage\SqliteQueryStore;
 use LaravelSqlMonitor\Console\Commands\AnalyseQueries;
 use LaravelSqlMonitor\Console\Commands\CleanupQueryLogs;
@@ -72,8 +74,14 @@ class SqlMonitorServiceProvider extends ServiceProvider
                 );
             }
 
-            // 未來可擴展其他 driver
-            return new SqliteQueryStore();
+            if ($driver === 'database') {
+                return new DatabaseQueryStore(
+                    connection: config('sql-monitor.storage.connection', config('database.default', 'mysql')),
+                    table: config('sql-monitor.storage.table', 'sql_monitor_logs')
+                );
+            }
+
+            throw MonitorException::storageError("Unsupported storage driver [{$driver}]. Supported drivers: sqlite, database.");
         });
 
         // ─── Monitor 服務 ──────────────────────────────────

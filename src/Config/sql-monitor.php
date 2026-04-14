@@ -26,6 +26,8 @@ return [
     'storage' => [
         'driver'          => 'sqlite',                              // sqlite | database
         'database'        => null,                                  // null = database_path('sql-monitor.sqlite')
+        'connection'      => null,                                  // driver=database 時使用，null = database.default
+        'table'           => 'sql_monitor_logs',                    // driver=database 時使用
         'retention_hours' => 24,                                    // 自動清理超過此時間的記錄
     ],
 

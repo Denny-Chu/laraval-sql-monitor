@@ -141,6 +141,14 @@ src/
     'enabled'                => env('SQL_MONITOR_ENABLED', true),
     'environments'           => ['local', 'testing'],
 
+    'storage' => [
+        'driver'          => 'sqlite',           // sqlite | database
+        'database'        => null,               // sqlite 檔案路徑（driver=sqlite）
+        'connection'      => null,               // Laravel DB 連線名（driver=database）
+        'table'           => 'sql_monitor_logs', // 寫入資料表（driver=database）
+        'retention_hours' => 24,
+    ],
+
     'complexity' => [
         'join_threshold'       => 5,      // JOIN 數超過 5 時警告
         'subquery_depth_limit' => 3,      // 子查詢深度限制
