@@ -16,11 +16,20 @@ class SqliteQueryStore implements QueryStoreInterface
     protected string $connection;
     protected string $table = 'sql_monitor_logs';
 
+    /**
+     * 延遲建表旗標。
+     *
+     * ensureTableExists() 從 constructor 移至首次呼叫 db() 時執行，
+     * 避免構建期間觸發 QueryExecuted 事件，導致 Laravel 容器在
+     * singleton 尚未存入 $instances 前重複構建，形成 512-frame 無限遞迴。
+     */
+    protected bool $tableEnsured = false;
+
     public function __construct(?string $database = null)
     {
         $this->connection = 'sql_monitor';
 
-        // 動態註冊 SQLite 連線
+        // 僅註冊連線設定，不執行任何 SQL
         config([
             "database.connections.{$this->connection}" => [
                 'driver'   => 'sqlite',
@@ -29,7 +38,8 @@ class SqliteQueryStore implements QueryStoreInterface
             ],
         ]);
 
-        $this->ensureTableExists();
+        // 不在 constructor 呼叫 ensureTableExists()
+        // 建表延遲至首次 db() 呼叫時執行（此時 singleton 已完整存入容器）
     }
 
     public function persist(QueryRecord $record): void
@@ -128,6 +138,11 @@ class SqliteQueryStore implements QueryStoreInterface
 
     protected function db()
     {
+        if (! $this->tableEnsured) {
+            $this->tableEnsured = true; // 先設旗標，避免 ensureTableExists 內部再次進入
+            $this->ensureTableExists();
+        }
+
         return DB::connection($this->connection)->table($this->table);
     }
 

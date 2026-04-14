@@ -97,13 +97,23 @@ class QueryListener
                 $isSlow = $this->slowTracker->track($record);
 
                 if ($isSlow) {
-                    $this->liveMonitor->broadcastSlowQuery($record);
+                    // 廣播用獨立 try-catch：廣播失敗（driver 未設定、網路問題等）
+                    // 不應影響主要的 $handling flag 狀態，避免 finally 提前重設後失去防護。
+                    try {
+                        $this->liveMonitor->broadcastSlowQuery($record);
+                    } catch (\Throwable) {
+                        // 廣播失敗靜默忽略，不中斷監控流程
+                    }
                 }
             }
 
             // ─── 5. 即時廣播 ───────────────────────────────────
             if (config('sql-monitor.live_monitor.enabled', true)) {
-                $this->liveMonitor->broadcastQuery($record);
+                try {
+                    $this->liveMonitor->broadcastQuery($record);
+                } catch (\Throwable) {
+                    // 同上，廣播失敗不中斷監控
+                }
             }
         } finally {
             self::$handling = false;

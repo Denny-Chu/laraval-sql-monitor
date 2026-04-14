@@ -16,12 +16,18 @@ class DatabaseQueryStore implements QueryStoreInterface
     protected string $connection;
     protected string $table;
 
+    /**
+     * 延遲建表旗標，原因同 SqliteQueryStore：
+     * 避免 constructor 觸發 QueryExecuted，在 singleton 構建期間造成容器遞迴。
+     */
+    protected bool $tableEnsured = false;
+
     public function __construct(string $connection = 'mysql', string $table = 'sql_monitor_logs')
     {
         $this->connection = $connection;
         $this->table = $table;
 
-        $this->ensureTableExists();
+        // 不在 constructor 呼叫 ensureTableExists()
     }
 
     public function persist(QueryRecord $record): void
@@ -120,6 +126,11 @@ class DatabaseQueryStore implements QueryStoreInterface
 
     protected function db()
     {
+        if (! $this->tableEnsured) {
+            $this->tableEnsured = true; // 先設旗標，避免 ensureTableExists 內部再次進入
+            $this->ensureTableExists();
+        }
+
         return DB::connection($this->connection)->table($this->table);
     }
 
