@@ -8,6 +8,8 @@ return [
     |--------------------------------------------------------------------------
     | 設為 false 將完全停用所有監控功能。
     | 建議僅在 local / testing 環境啟用。
+    |
+    | .env: SQL_MONITOR_ENABLED=true
     */
     'enabled' => env('SQL_MONITOR_ENABLED', true),
 
@@ -20,15 +22,54 @@ return [
 
     /*
     |--------------------------------------------------------------------------
+    | 監控的資料庫連線（白名單）
+    |--------------------------------------------------------------------------
+    | 指定要監控的連線名稱陣列，空陣列 = 監控所有連線。
+    |
+    | 範例（只監控 mysql）：
+    |   'connections' => ['mysql'],
+    */
+    'connections' => [],
+
+    /*
+    |--------------------------------------------------------------------------
+    | 排除監控的連線（黑名單）
+    |--------------------------------------------------------------------------
+    | 這些連線的查詢永遠不會被記錄，優先於 connections 白名單。
+    |
+    | 常見用途：
+    |   1. storage.driver = database 且連線為 MySQL 時，
+    |      若不想用獨立連線，可將 storage 連線名稱加到這裡，
+    |      避免 persist() 觸發 QueryExecuted → 無限迴圈。
+    |   2. IndexInspector 使用的連線（靜態分析查 INFORMATION_SCHEMA 時）。
+    |
+    | 範例：
+    |   'excluded_connections' => ['sql_monitor_storage'],
+    */
+    'excluded_connections' => [],
+
+    /*
+    |--------------------------------------------------------------------------
     | 數據存儲
     |--------------------------------------------------------------------------
+    | driver = sqlite（預設）：
+    |   使用獨立 SQLite 檔案，完全不影響應用程式 MySQL，零迴圈風險。
+    |
+    | driver = database（使用既有 MySQL/PostgreSQL 連線）：
+    |   強烈建議在 config/database.php 設定一條獨立連線（如 sql_monitor_mysql），
+    |   並將 connection 指向它，以確保 storage 查詢自動被 QueryListener 過濾。
+    |
+    | .env:
+    |   SQL_MONITOR_STORAGE_DRIVER=sqlite       # sqlite | database
+    |   SQL_MONITOR_STORAGE_CONNECTION=         # driver=database 時使用的連線名稱
+    |   SQL_MONITOR_STORAGE_DATABASE=           # SQLite 路徑（空 = 預設路徑）
     */
     'storage' => [
-        'driver'          => 'sqlite',                              // sqlite | database
-        'database'        => null,                                  // null = database_path('sql-monitor.sqlite')
-        'connection'      => null,                                  // driver=database 時使用，null = database.default
-        'table'           => 'sql_monitor_logs',                    // driver=database 時使用
-        'retention_hours' => 24,                                    // 自動清理超過此時間的記錄
+        'driver'          => env('SQL_MONITOR_STORAGE_DRIVER', 'sqlite'),
+        'database'        => env('SQL_MONITOR_STORAGE_DATABASE') ?: null,
+        'connection'      => env('SQL_MONITOR_STORAGE_CONNECTION') ?: null,
+        'table'           => 'sql_monitor_logs',
+        'retention_hours' => 24,
     ],
 
     /*
@@ -68,10 +109,13 @@ return [
     |--------------------------------------------------------------------------
     | Slow Query 追蹤
     |--------------------------------------------------------------------------
+    | threshold_ms 建議透過 env 調整，不同環境的效能基準往往不同。
+    |
+    | .env: SQL_MONITOR_SLOW_QUERY_THRESHOLD_MS=100
     */
     'slow_query' => [
         'enabled'      => true,
-        'threshold_ms' => 100,              // 閾值（毫秒）
+        'threshold_ms' => (int) env('SQL_MONITOR_SLOW_QUERY_THRESHOLD_MS', 100),
     ],
 
     /*
@@ -100,8 +144,9 @@ return [
     |--------------------------------------------------------------------------
     | IDE 跳轉整合
     |--------------------------------------------------------------------------
+    | .env: SQL_MONITOR_IDE=vscode   # vscode | phpstorm | sublime
     */
-    'ide' => env('SQL_MONITOR_IDE', 'vscode'),  // vscode | phpstorm | sublime
+    'ide' => env('SQL_MONITOR_IDE', 'vscode'),
 
     /*
     |--------------------------------------------------------------------------
@@ -118,4 +163,5 @@ return [
     | 回傳 true 表示允許訪問。null 代表不做額外授權檢查。
     */
     'gate' => null,
+
 ];
