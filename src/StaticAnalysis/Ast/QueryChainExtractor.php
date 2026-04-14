@@ -29,10 +29,10 @@ use PhpParser\Node\Arg;
  */
 class QueryChainExtractor
 {
-    /** DB Facade 靜態方法（作為鏈式查詢起點） */
+    /** DB Facade 靜態方法（作為查詢起點） */
     private const DB_ROOT_METHODS = [
-        'table', 'select', 'raw', 'query', 'statement',
-        'transaction', 'unprepared',
+        'table', 'select', 'query', 'statement',
+        'unprepared',
     ];
 
     /** Eloquent/Model 靜態方法（作為鏈式查詢起點） */
@@ -84,6 +84,42 @@ class QueryChainExtractor
         'when', 'unless',
     ];
 
+    /** 真正以「欄位名」作為第一參數的 WHERE 方法 */
+    private const COLUMN_WHERE_METHODS = [
+        'where', 'orWhere', 'whereIn', 'whereNotIn',
+        'whereBetween', 'whereNull', 'whereNotNull',
+        'whereLike', 'whereDate', 'whereYear', 'whereMonth',
+        'whereColumn',
+    ];
+
+    /**
+     * 已知非 Eloquent 的 Laravel Facade / 類別，即使呼叫了同名方法也不視為查詢。
+     * 例如 Cache::has(), Event::dispatch(), Auth::check() 等。
+     */
+    private const NON_ELOQUENT_CLASSES = [
+        // 短名稱
+        'Cache', 'Event', 'Auth', 'Session', 'Log', 'Queue',
+        'Storage', 'Mail', 'Notification', 'Route', 'Config',
+        'View', 'Response', 'Redirect', 'Validator', 'Gate',
+        'Hash', 'Crypt', 'Str', 'Arr', 'Bus', 'Http',
+        'Request', 'RateLimiter', 'Artisan', 'Schema', 'App',
+        // 完整命名空間
+        'Illuminate\\Support\\Facades\\Cache',
+        'Illuminate\\Support\\Facades\\Event',
+        'Illuminate\\Support\\Facades\\Auth',
+        'Illuminate\\Support\\Facades\\Session',
+        'Illuminate\\Support\\Facades\\Log',
+        'Illuminate\\Support\\Facades\\Queue',
+        'Illuminate\\Support\\Facades\\Storage',
+        'Illuminate\\Support\\Facades\\Mail',
+        'Illuminate\\Support\\Facades\\Route',
+        'Illuminate\\Support\\Facades\\Config',
+        'Illuminate\\Support\\Facades\\Gate',
+        'Illuminate\\Support\\Facades\\Hash',
+        'Illuminate\\Support\\Facades\\Schema',
+        'Illuminate\\Support\\Facades\\RateLimiter',
+    ];
+
     /** WITH (Eager Load) 方法 */
     private const WITH_METHODS = [
         'with', 'withCount', 'withSum', 'withAvg', 'withMin', 'withMax',
@@ -133,6 +169,7 @@ class QueryChainExtractor
 
         // 建立 CallSite
         $callSite              = new QueryCallSite();
+        $callSite->rootClass   = $rootClass;
         $callSite->rootType    = $rootType;
         $callSite->rootMethod  = $rootMethod;
         $callSite->rootArgs    = $this->extractArgs($root->args);
@@ -227,7 +264,7 @@ class QueryChainExtractor
         if (in_array($method, self::WHERE_METHODS, true)) {
             $site->wheres[] = [
                 'method'   => $method,
-                'column'   => $args[0] ?? null,
+                'column'   => $this->resolveWhereColumn($method, $args),
                 'operator' => $this->resolveOperator($args),
                 'value'    => $this->resolveWhereValue($args),
                 'line'     => $line,
@@ -282,8 +319,12 @@ class QueryChainExtractor
             }
         }
 
-        // Eloquent Model（任何不是 DB 的類，且呼叫了 Eloquent 靜態方法）
-        if ($class !== 'DB' && in_array($method, self::ELOQUENT_ROOT_METHODS, true)) {
+        // Eloquent Model（任何不是 DB 且不在排除清單中的類，且呼叫了 Eloquent 靜態方法）
+        if (
+            $class !== 'DB'
+            && ! in_array($class, self::NON_ELOQUENT_CLASSES, true)
+            && in_array($method, self::ELOQUENT_ROOT_METHODS, true)
+        ) {
             return 'eloquent';
         }
 
@@ -393,6 +434,21 @@ class QueryChainExtractor
         }
 
         return '=';
+    }
+
+    private function resolveWhereColumn(string $method, array $args): mixed
+    {
+        if (! in_array($method, self::COLUMN_WHERE_METHODS, true)) {
+            return null;
+        }
+
+        $column = $args[0] ?? null;
+
+        if ($column === 'Closure' || (is_string($column) && str_starts_with($column, '$'))) {
+            return null;
+        }
+
+        return $column;
     }
 
     private function resolveWhereValue(array $args): mixed

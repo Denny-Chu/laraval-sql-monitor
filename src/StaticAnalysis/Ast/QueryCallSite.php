@@ -14,6 +14,9 @@ namespace LaravelSqlMonitor\StaticAnalysis\Ast;
  */
 class QueryCallSite
 {
+    /** 根類別名稱（例如 DB / App\Models\User） */
+    public ?string $rootClass = null;
+
     /** 呼叫的根類型：db | eloquent | query_builder */
     public string $rootType;
 
@@ -92,7 +95,7 @@ class QueryCallSite
         }
 
         foreach ($this->selects as $col) {
-            if (str_ends_with(trim($col), '*')) {
+            if (is_string($col) && str_ends_with(trim($col), '*')) {
                 return true;
             }
         }
@@ -131,7 +134,7 @@ class QueryCallSite
             return "'{$arg}'";
         }
         if (is_array($arg)) {
-            return '[' . implode(', ', $arg) . ']';
+            return '[' . implode(', ', array_map([$this, 'stringifyArg'], $arg)) . ']';
         }
         if ($arg === null) {
             return 'null';

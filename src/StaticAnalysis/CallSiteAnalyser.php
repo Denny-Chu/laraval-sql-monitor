@@ -36,6 +36,12 @@ class CallSiteAnalyser
     private const JOIN_WARNING_THRESHOLD  = 3;
     private const JOIN_CRITICAL_THRESHOLD = 5;
 
+    /** 寫入操作的根方法或終端方法（不適用 SELECT 相關規則） */
+    private const WRITE_METHODS = [
+        'create', 'insert', 'insertOrIgnore', 'insertGetId', 'upsert',
+        'update', 'delete', 'forceDelete', 'truncate',
+    ];
+
     public function __construct(
         private readonly ?IndexInspector $indexInspector = null,
     ) {}
@@ -51,20 +57,22 @@ class CallSiteAnalyser
         $indexDetails = [];
         $primaryTable = $this->extractPrimaryTable($site);
 
+        $isWrite = $this->isWriteOperation($site);
+
         // ── 1. SELECT * ──────────────────────────────────────
-        if ($site->hasSelectStar()) {
+        if (! $isWrite && $site->hasSelectStar()) {
             $issues[] = $this->issue('info', 'select-star',
                 '使用了 SELECT *，建議明確指定所需欄位以減少 I/O');
         }
 
         // ── 2. 無 WHERE 條件 ─────────────────────────────────
-        if (empty($site->wheres) && $this->isBulkTerminal($site->terminalMethod)) {
+        if (! $isWrite && empty($site->wheres) && $this->isBulkTerminal($site)) {
             $issues[] = $this->issue('warning', 'no-where',
                 '無 WHERE 條件，可能造成全表掃描');
         }
 
         // ── 3. 無 LIMIT ────────────────────────────────────
-        if (! $site->hasLimit && $this->isBulkTerminal($site->terminalMethod)
+        if (! $isWrite && ! $site->hasLimit && $this->isBulkTerminal($site)
             && ! in_array($site->terminalMethod, ['cursor', 'lazy', 'chunk'], true)
         ) {
             $issues[] = $this->issue('warning', 'no-limit',
@@ -95,7 +103,7 @@ class CallSiteAnalyser
         if ($this->indexInspector && $primaryTable) {
             foreach ($site->wheres as $where) {
                 $col = $where['column'] ?? null;
-                if ($col === null || str_contains($col, '.')) {
+                if ($col === null || !is_string($col) || str_contains($col, '.') || str_starts_with($col, '$')) {
                     continue; // 跳過含表名前綴的欄位（需更複雜處理）
                 }
 
@@ -137,8 +145,8 @@ class CallSiteAnalyser
         }
 
         // ── 10. Eloquent N+1 風險 ────────────────────────────
-        if ($site->isEloquent() && empty($site->withs)
-            && $this->isBulkTerminal($site->terminalMethod)
+        if (! $isWrite && $site->isEloquent() && empty($site->withs)
+            && $this->isBulkTerminal($site)
         ) {
             $issues[] = $this->issue('info', 'n1-risk',
                 'Eloquent 批量查詢未使用 with() 預先載入，存在 N+1 查詢風險');
@@ -191,7 +199,7 @@ class CallSiteAnalyser
         $score += min($site->joinCount() * 15, 50);
 
         // 無 WHERE
-        if (empty($site->wheres) && $this->isBulkTerminal($site->terminalMethod)) {
+        if (empty($site->wheres) && $this->isBulkTerminal($site)) {
             $score += 15;
         }
 
@@ -200,12 +208,12 @@ class CallSiteAnalyser
         $score += min($unindexed * 10, 30);
 
         // SELECT *
-        if ($site->hasSelectStar()) {
+        if (! $this->isWriteOperation($site) && $site->hasSelectStar()) {
             $score += 5;
         }
 
         // 無 LIMIT
-        if (! $site->hasLimit && $this->isBulkTerminal($site->terminalMethod)
+        if (! $this->isWriteOperation($site) && ! $site->hasLimit && $this->isBulkTerminal($site)
             && ! in_array($site->terminalMethod, ['cursor', 'lazy', 'chunk'], true)
         ) {
             $score += 10;
@@ -249,7 +257,7 @@ class CallSiteAnalyser
         }
 
         // WHERE 條件
-        if (empty($site->wheres) && $this->isBulkTerminal($site->terminalMethod)) {
+        if (! $this->isWriteOperation($site) && empty($site->wheres) && $this->isBulkTerminal($site)) {
             $cost *= 3.0;
         } else {
             foreach ($site->wheres as $ignored) {
@@ -264,7 +272,7 @@ class CallSiteAnalyser
         }
 
         // 無 LIMIT（批量查詢）
-        if (! $site->hasLimit && $this->isBulkTerminal($site->terminalMethod)
+        if (! $this->isWriteOperation($site) && ! $site->hasLimit && $this->isBulkTerminal($site)
             && ! in_array($site->terminalMethod, ['cursor', 'lazy', 'chunk'], true)
         ) {
             $cost *= 2.0;
@@ -294,15 +302,20 @@ class CallSiteAnalyser
         if ($site->rootType === 'db' && ! empty($site->rootArgs)) {
             $first = $site->rootArgs[0] ?? null;
             if (is_string($first) && $first !== '') {
-                return $first;
+                return $this->normalizeTableName($first);
             }
         }
 
         // Eloquent Model::query() / Model::where() 等
-        // rootArgs[0] 可能是類別名稱，嘗試推斷表名
-        if ($site->rootType === 'eloquent' && ! empty($site->rootArgs)) {
-            $className = $site->rootArgs[0] ?? null;
-            if (is_string($className) && $className !== '') {
+        // rootClass 才是 Model 類別名稱；rootArgs 通常是查詢方法的參數
+        if ($site->rootType === 'eloquent') {
+            $className = $site->rootClass;
+
+            if (! is_string($className) || $className === '') {
+                $className = $site->rootArgs[0] ?? null;
+            }
+
+            if (is_string($className) && $className !== '' && ! str_starts_with($className, '$')) {
                 return $this->classNameToTable($className);
             }
         }
@@ -325,12 +338,65 @@ class CallSiteAnalyser
     }
 
     /**
-     * 判斷終端方法是否為「批量」類型（可能回傳多筆資料）。
+     * 將 DB::table() 的字串表名正規化，移除 alias。
+     * 例：users AS u -> users, users u -> users
      */
-    private function isBulkTerminal(?string $method): bool
+    private function normalizeTableName(string $table): string
     {
+        $table = trim($table);
+
+        if ($table === '' || str_starts_with($table, '(')) {
+            return $table;
+        }
+
+        $normalized = preg_replace('/\s+as\s+[^\s]+$/i', '', $table);
+        if (is_string($normalized)) {
+            $table = trim($normalized);
+        }
+
+        if (! str_contains($table, ' ')) {
+            return $table;
+        }
+
+        $normalized = preg_replace('/\s+[^\s]+$/', '', $table);
+
+        return is_string($normalized) ? trim($normalized) : $table;
+    }
+
+    /**
+     * 判斷呼叫點是否為寫入操作（INSERT / UPDATE / DELETE），
+     * 寫入操作不適用 SELECT 相關規則。
+     */
+    private function isWriteOperation(QueryCallSite $site): bool
+    {
+        if (in_array($site->rootMethod, self::WRITE_METHODS, true)) {
+            return true;
+        }
+
+        if ($site->terminalMethod !== null
+            && in_array($site->terminalMethod, self::WRITE_METHODS, true)
+        ) {
+            return true;
+        }
+
+        return false;
+    }
+
+    /**
+     * 判斷呼叫點是否為「批量」類型（可能回傳多筆資料）。
+     *
+     * 優先用 terminalMethod 判斷；若為 null（例如 User::find($id) 無後續鏈），
+     * 則 fallback 到 rootMethod，避免單筆查詢方法被誤判為批量。
+     */
+    private function isBulkTerminal(QueryCallSite $site): bool
+    {
+        $method = $site->terminalMethod
+            ?? (in_array($site->rootMethod, self::SINGLE_TERMINAL_METHODS, true)
+                ? $site->rootMethod
+                : null);
+
         if ($method === null) {
-            return true; // 未偵測到終端方法，視為潛在批量
+            return true; // 未偵測到任何終端方法，視為潛在批量
         }
 
         return ! in_array($method, self::SINGLE_TERMINAL_METHODS, true);
