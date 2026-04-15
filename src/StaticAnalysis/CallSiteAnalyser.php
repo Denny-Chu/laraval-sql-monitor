@@ -395,17 +395,39 @@ class CallSiteAnalyser
     }
 
     /**
-     * 將 Model 類別名稱轉換為預設的表名稱。
-     * 例：App\Models\UserProfile → user_profiles
+     * 將 Model 類別名稱轉換為實際表名稱。
+     *
+     * 優先順序：
+     *   1. 透過 ReflectionClass::getDefaultProperties() 讀取 $table 屬性預設值
+     *      （不需實例化 Model，安全且無副作用）
+     *   2. Fallback：Str::snake(Str::plural($short))
+     *      （Laravel 預設慣例，適用於未明確定義 $table 的 Model）
+     *
+     * 例：
+     *   App\Models\PurchaseItem（有 $table = 'purchase_item'）→ 'purchase_item'
+     *   App\Models\UserProfile（無 $table 屬性）→ 'user_profiles'
      */
     private function classNameToTable(string $className): string
     {
-        // 取短名稱
+        // 取短名稱（同時保留作為 fallback 基礎）
         $parts = explode('\\', $className);
         $short = end($parts);
+        $fallback = Str::snake(Str::plural($short));
 
-        // 轉蛇底式並簡單複數化
-        return Str::snake(Str::plural($short));
+        // 嘗試透過 Reflection 讀取 Model 的 $table 屬性預設值
+        try {
+            if (class_exists($className, autoload: true)) {
+                $defaults = (new \ReflectionClass($className))->getDefaultProperties();
+
+                if (isset($defaults['table']) && is_string($defaults['table']) && $defaults['table'] !== '') {
+                    return $defaults['table'];
+                }
+            }
+        } catch (\Throwable) {
+            // class 載入失敗或 reflection 失敗，直接 fallback
+        }
+
+        return $fallback;
     }
 
     /**
