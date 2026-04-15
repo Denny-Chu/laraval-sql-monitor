@@ -56,15 +56,19 @@ class QueryChainExtractor
 
     /** 終止方法（代表查詢最終執行） */
     private const TERMINAL_METHODS = [
-        'get', 'first', 'firstOrFail', 'find', 'findOrFail',
+        'get', 'first', 'firstOrFail', 'find', 'findOrFail', 'findOrNew', 'firstOrNew', 'firstOrCreate', 'sole',
         'paginate', 'simplePaginate', 'cursorPaginate',
         'count', 'exists', 'doesntExist',
         'sum', 'avg', 'min', 'max',
         'value', 'pluck', 'lists',
-        'chunk', 'each', 'lazy', 'cursor',
-        'insert', 'insertOrIgnore', 'insertGetId', 'upsert',
-        'update', 'delete', 'truncate', 'forceDelete',
-        'all', 'toSql', 'dd', 'dump',
+        'chunk', 'chunkById', 'chunkMap',
+        'each', 'eachById',
+        'lazy', 'lazyById', 'cursor',
+        'insert', 'insertOrIgnore', 'insertGetId', 'insertUsing', 'upsert',
+        'update', 'updateOrInsert', 'updateOrCreate', 'updateExistingPivot',
+        'increment', 'decrement', 'incrementEach', 'decrementEach',
+        'delete', 'truncate', 'forceDelete',
+        'all', 'toSql', 'dd', 'dump', 'explain',
     ];
 
     /** JOIN 方法 */

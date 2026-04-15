@@ -30,7 +30,22 @@ class CallSiteAnalyser
     private const BULK_TERMINAL_METHODS = ['get', 'pluck', 'cursor', 'lazy', 'chunk', null];
 
     /** 被視為「單筆」的終端方法（不需要 LIMIT 檢查） */
-    private const SINGLE_TERMINAL_METHODS = ['first', 'find', 'findOrFail', 'firstOrFail', 'sole', 'value', 'count', 'sum', 'avg', 'min', 'max', 'exists', 'doesntExist'];
+    private const SINGLE_TERMINAL_METHODS = [
+        'first', 'find', 'findOrFail', 'firstOrFail', 'sole',
+        // firstOrCreate / firstOrNew / findOrNew / updateOrCreate 均回傳單一 model
+        'firstOrCreate', 'firstOrNew', 'findOrNew', 'updateOrCreate',
+        'value', 'count', 'sum', 'avg', 'min', 'max', 'exists', 'doesntExist',
+    ];
+
+    /**
+     * 聚合 / 純量 terminal：Laravel 會重寫 SELECT 子句
+     * （例如 count→count(*)、value('col')→SELECT col、sum('col')→sum(col)），
+     * 因此 select-star 規則對它們不適用。
+     */
+    private const SCALAR_TERMINAL_METHODS = [
+        'count', 'exists', 'doesntExist',
+        'sum', 'avg', 'min', 'max', 'value',
+    ];
 
     /** JOIN 數量門檻 */
     private const JOIN_WARNING_THRESHOLD  = 3;
@@ -38,8 +53,20 @@ class CallSiteAnalyser
 
     /** 寫入操作的根方法或終端方法（不適用 SELECT 相關規則） */
     private const WRITE_METHODS = [
-        'create', 'insert', 'insertOrIgnore', 'insertGetId', 'upsert',
-        'update', 'delete', 'forceDelete', 'truncate',
+        'create', 'insert', 'insertOrIgnore', 'insertGetId', 'insertUsing', 'upsert',
+        'update', 'updateOrInsert', 'updateOrCreate', 'updateExistingPivot',
+        'increment', 'decrement', 'incrementEach', 'decrementEach',
+        'delete', 'forceDelete', 'truncate',
+    ];
+
+    /**
+     * `DB::` facade 下代表「執行 raw SQL」的方法。
+     * 這些方法的第一個參數是 SQL 字串，不走 Query Builder 鏈，
+     * 因此 select-star / no-where / no-limit / n1-risk 等基於方法鏈的規則都不適用。
+     */
+    private const RAW_SQL_ROOT_METHODS = [
+        'statement', 'unprepared', 'select', 'raw',
+        'insert', 'update', 'delete', 'affectingStatement',
     ];
 
     public function __construct(
@@ -57,23 +84,57 @@ class CallSiteAnalyser
         $indexDetails = [];
         $primaryTable = $this->extractPrimaryTable($site);
 
-        $isWrite = $this->isWriteOperation($site);
+        $isWrite  = $this->isWriteOperation($site);
+        $isRawSql = $this->isRawSqlCall($site);
+
+        // Raw SQL：方法鏈類規則不適用，只發出一次性提示，快速回傳
+        if ($isRawSql) {
+            $issues[] = $this->issue('info', 'raw-sql',
+                '偵測到 raw SQL（DB::statement / DB::select / DB::unprepared 等），靜態分析無法檢查 SQL 內容，請人工審查');
+
+            return new CallSiteReport(
+                callSite:        $site,
+                primaryTable:    null,
+                issues:          $issues,
+                complexityScore: 0,
+                estimatedCost:   1.0,
+                indexDetails:    [],
+            );
+        }
 
         // ── 1. SELECT * ──────────────────────────────────────
-        if (! $isWrite && $site->hasSelectStar()) {
+        // 聚合 / 純量 terminal（count/exists/value/sum...）會被 Laravel 重寫 SELECT 子句，
+        // 即便 chain 無顯式 select()，實際送出的 SQL 不會是 SELECT *。
+        if (! $isWrite && $site->hasSelectStar()
+            && ! $this->terminalRewritesSelectClause($site)
+        ) {
             $issues[] = $this->issue('info', 'select-star',
                 '使用了 SELECT *，建議明確指定所需欄位以減少 I/O');
         }
 
         // ── 2. 無 WHERE 條件 ─────────────────────────────────
-        if (! $isWrite && empty($site->wheres) && $this->isBulkTerminal($site)) {
+        // 註：只有「已經看到終端方法」的呼叫點才檢查 no-where，避免
+        // split-chain 模式（`$q = Model::with(); $q->where()->get()`）
+        // 因為 extractor 看不到後續鏈而誤報。其他規則（select-star、
+        // n1-risk、join 檢查）不受影響，該呼叫點仍然會被分析。
+        if (! $isWrite && empty($site->wheres) && $this->isBulkTerminal($site)
+            && $site->terminalMethod !== null
+        ) {
             $issues[] = $this->issue('warning', 'no-where',
                 '無 WHERE 條件，可能造成全表掃描');
         }
 
         // ── 3. 無 LIMIT ────────────────────────────────────
+        // 串流 / 分批 terminal（cursor / lazy / chunk / each 家族）
+        // 本身就會控制 batch 大小，無需強制要求 LIMIT。
         if (! $isWrite && ! $site->hasLimit && $this->isBulkTerminal($site)
-            && ! in_array($site->terminalMethod, ['cursor', 'lazy', 'chunk'], true)
+            && $site->terminalMethod !== null
+            && ! in_array($site->terminalMethod, [
+                'cursor',
+                'lazy', 'lazyById',
+                'chunk', 'chunkById', 'chunkMap',
+                'each', 'eachById',
+            ], true)
         ) {
             $issues[] = $this->issue('warning', 'no-limit',
                 '無 LIMIT 限制，可能回傳大量資料');
@@ -145,8 +206,10 @@ class CallSiteAnalyser
         }
 
         // ── 10. Eloquent N+1 風險 ────────────────────────────
+        // 只有「回傳 Model / Model Collection」的 terminal 才有 N+1 風險，
+        // pluck/value/count/exists 等回傳原始值者不適用（無 relation 可 lazy-load）。
         if (! $isWrite && $site->isEloquent() && empty($site->withs)
-            && $this->isBulkTerminal($site)
+            && $this->returnsHydratedModels($site)
         ) {
             $issues[] = $this->issue('info', 'n1-risk',
                 'Eloquent 批量查詢未使用 with() 預先載入，存在 N+1 查詢風險');
@@ -208,13 +271,21 @@ class CallSiteAnalyser
         $score += min($unindexed * 10, 30);
 
         // SELECT *
-        if (! $this->isWriteOperation($site) && $site->hasSelectStar()) {
+        if (! $this->isWriteOperation($site) && $site->hasSelectStar()
+            && ! $this->terminalRewritesSelectClause($site)
+        ) {
             $score += 5;
         }
 
         // 無 LIMIT
         if (! $this->isWriteOperation($site) && ! $site->hasLimit && $this->isBulkTerminal($site)
-            && ! in_array($site->terminalMethod, ['cursor', 'lazy', 'chunk'], true)
+            && $site->terminalMethod !== null
+            && ! in_array($site->terminalMethod, [
+                'cursor',
+                'lazy', 'lazyById',
+                'chunk', 'chunkById', 'chunkMap',
+                'each', 'eachById',
+            ], true)
         ) {
             $score += 10;
         }
@@ -367,6 +438,51 @@ class CallSiteAnalyser
      * 判斷呼叫點是否為寫入操作（INSERT / UPDATE / DELETE），
      * 寫入操作不適用 SELECT 相關規則。
      */
+    /**
+     * 回傳 terminal 是否會產生「model / model collection」結果。
+     * 只有這類結果才可能因為未 eager-load relation 而產生 N+1。
+     *
+     * pluck/value/count/sum/exists 等返回原始值，不具 relation 存取點，故排除。
+     * terminal 為 null（鏈被中斷）時保守視為 true，維持原本的 over-report 行為。
+     */
+    private function returnsHydratedModels(QueryCallSite $site): bool
+    {
+        $method = $site->terminalMethod;
+
+        if ($method === null) {
+            // 無 terminal 視為未知，和原本 isBulkTerminal(null)=true 一致，保留 over-report
+            return true;
+        }
+
+        static $hydratedBulkTerminals = [
+            'get', 'all',
+            'paginate', 'simplePaginate', 'cursorPaginate',
+            'cursor',
+            'chunk', 'chunkById', 'chunkMap',
+            'each', 'eachById',
+            'lazy', 'lazyById',
+        ];
+
+        return in_array($method, $hydratedBulkTerminals, true);
+    }
+
+    /**
+     * 判斷是否為 DB facade 的 raw SQL 呼叫（非 Query Builder 鏈）。
+     * 例：DB::statement('SET ...'), DB::select('SELECT ...'), DB::unprepared(...)
+     */
+    private function isRawSqlCall(QueryCallSite $site): bool
+    {
+        if ($site->rootType !== 'db') {
+            return false;
+        }
+
+        if ($site->rootMethod === null) {
+            return false;
+        }
+
+        return in_array($site->rootMethod, self::RAW_SQL_ROOT_METHODS, true);
+    }
+
     private function isWriteOperation(QueryCallSite $site): bool
     {
         if (in_array($site->rootMethod, self::WRITE_METHODS, true)) {
@@ -379,7 +495,79 @@ class CallSiteAnalyser
             return true;
         }
 
+        // 啟發式：僅在「terminal 未被識別為任何已知執行方法」時使用，
+        // 若鏈最尾端是未知的方法名稱但名稱看起來是寫入操作（deleteWithAuthor 等專案自訂包裝），
+        // 視為寫入以避免對 select-star / no-limit / n1-risk 誤判。
+        if ($site->terminalMethod === null) {
+            $lastMethod = $this->lastChainMethod($site);
+            if ($lastMethod !== null && $this->looksLikeWriteMethodName($lastMethod)) {
+                return true;
+            }
+        }
+
         return false;
+    }
+
+    /**
+     * 取得查詢鏈中最後一個方法名稱（若無則為 null）。
+     */
+    private function lastChainMethod(QueryCallSite $site): ?string
+    {
+        if (empty($site->chain)) {
+            return $site->rootMethod;
+        }
+
+        $last = end($site->chain);
+
+        return is_array($last) && isset($last['method']) && is_string($last['method'])
+            ? $last['method']
+            : null;
+    }
+
+    /**
+     * 啟發式：方法名稱是否看起來像寫入操作。
+     * 僅用於「terminal 未匹配已知方法」的 fallback，不覆蓋已知判斷。
+     */
+    private function looksLikeWriteMethodName(string $method): bool
+    {
+        // 常見寫入動詞前綴（小寫匹配）
+        // 排除過於模糊的動詞如 edit/modify/store/add/save，避免誤把讀取型別方法當成寫入。
+        static $prefixes = [
+            'delete', 'destroy', 'remove', 'purge', 'softDelete', 'forceDelete',
+            'update', 'upsert',
+            'insert', 'create',
+            'increment', 'decrement',
+            'sync', 'attach', 'detach',
+            'restore',
+        ];
+
+        foreach ($prefixes as $p) {
+            if (stripos($method, $p) === 0) {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    /**
+     * Laravel 會針對某些 terminal 覆寫 SELECT 子句，
+     * 此時 select-star 規則不適用：
+     *  - 聚合/純量：count / exists / sum / avg / min / max / value
+     *  - pluck('col'[, 'key']) 會精確選取指定欄位
+     */
+    private function terminalRewritesSelectClause(QueryCallSite $site): bool
+    {
+        $method = $site->terminalMethod;
+        if ($method === null) {
+            return false;
+        }
+
+        if (in_array($method, self::SCALAR_TERMINAL_METHODS, true)) {
+            return true;
+        }
+
+        return $method === 'pluck';
     }
 
     /**

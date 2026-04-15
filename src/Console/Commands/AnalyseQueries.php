@@ -65,35 +65,40 @@ class AnalyseQueries extends Command
         'LOW'       => 'green',
     ];
 
+    /** 是否為 JSON 輸出模式（裝飾輸出導向 stderr，避免污染 JSON） */
+    private bool $jsonMode = false;
+
     // ─── 主要流程 ──────────────────────────────────────────────
 
     public function handle(): int
     {
+        $this->jsonMode = $this->option('format') === 'json';
+
         $this->printBanner();
 
         // 1. 解析目標檔案
         $files = $this->resolveTargetFiles();
 
         if (empty($files)) {
-            $this->error('  找不到可分析的 PHP 檔案。');
+            $this->noticeError('  找不到可分析的 PHP 檔案。');
             return self::FAILURE;
         }
 
-        $this->info("  找到 " . count($files) . " 個 PHP 檔案，開始掃描...");
-        $this->newLine();
+        $this->notice("  找到 " . count($files) . " 個 PHP 檔案，開始掃描...");
+        $this->noticeNewLine();
 
         // 2. AST 掃描：提取所有查詢呼叫點
         $astAnalyser = new AstAnalyser();
         $callSites   = $this->scanFiles($astAnalyser, $files);
 
         if (empty($callSites)) {
-            $this->info('  未偵測到任何資料庫查詢呼叫。');
+            $this->notice('  未偵測到任何資料庫查詢呼叫。');
             return self::SUCCESS;
         }
 
-        $this->newLine();
-        $this->info("  偵測到 " . count($callSites) . " 個查詢呼叫點，開始分析...");
-        $this->newLine();
+        $this->noticeNewLine();
+        $this->notice("  偵測到 " . count($callSites) . " 個查詢呼叫點，開始分析...");
+        $this->noticeNewLine();
 
         // 3. 深度分析每個呼叫點
         $indexInspector  = $this->option('no-index-check') ? null : $this->makeIndexInspector();
@@ -145,7 +150,7 @@ class AnalyseQueries extends Command
             return [];
         }
 
-        $this->line("  <comment>目標：</comment> {$appPath}");
+        $this->noticeLine("  <comment>目標：</comment> {$appPath}");
 
         return $this->scanDirectory($appPath);
     }
@@ -161,16 +166,16 @@ class AnalyseQueries extends Command
             : base_path($path);
 
         if (is_file($absolutePath) && str_ends_with($absolutePath, '.php')) {
-            $this->line("  <comment>目標檔案：</comment> {$absolutePath}");
+            $this->noticeLine("  <comment>目標檔案：</comment> {$absolutePath}");
             return [$absolutePath];
         }
 
         if (is_dir($absolutePath)) {
-            $this->line("  <comment>目標目錄：</comment> {$absolutePath}");
+            $this->noticeLine("  <comment>目標目錄：</comment> {$absolutePath}");
             return $this->scanDirectory($absolutePath);
         }
 
-        $this->error("  路徑不存在或非 PHP 檔案：{$path}");
+        $this->noticeError("  路徑不存在或非 PHP 檔案：{$path}");
 
         return [];
     }
@@ -184,7 +189,7 @@ class AnalyseQueries extends Command
         $file = $this->resolveClassFile($className);
 
         if ($file) {
-            $this->line("  <comment>目標類別：</comment> {$className} → {$file}");
+            $this->noticeLine("  <comment>目標類別：</comment> {$className} → {$file}");
             return [$file];
         }
 
@@ -202,7 +207,7 @@ class AnalyseQueries extends Command
             foreach ($namespaces as $fqcn) {
                 $file = $this->resolveClassFile($fqcn);
                 if ($file) {
-                    $this->line("  <comment>目標類別：</comment> {$fqcn} → {$file}");
+                    $this->noticeLine("  <comment>目標類別：</comment> {$fqcn} → {$file}");
                     return [$file];
                 }
             }
@@ -210,12 +215,12 @@ class AnalyseQueries extends Command
             // 最後嘗試：在 app/ 目錄中搜尋檔名匹配
             $found = $this->findFileByClassName($className);
             if ($found) {
-                $this->line("  <comment>目標檔案（檔名匹配）：</comment> {$found}");
+                $this->noticeLine("  <comment>目標檔案（檔名匹配）：</comment> {$found}");
                 return [$found];
             }
         }
 
-        $this->error("  找不到類別：{$className}");
+        $this->noticeError("  找不到類別：{$className}");
 
         return [];
     }
@@ -298,8 +303,9 @@ class AnalyseQueries extends Command
     {
         $callSites  = [];
         $errorCount = 0;
-        $bar        = $this->output->createProgressBar(count($files));
 
+        $progressOutput = $this->jsonMode ? $this->stderrOutput() : $this->output;
+        $bar = new \Symfony\Component\Console\Helper\ProgressBar($progressOutput, count($files));
         $bar->setFormat('  %current%/%max% [%bar%] %percent:3s%% %message%');
         $bar->setMessage('');
 
@@ -322,8 +328,8 @@ class AnalyseQueries extends Command
         $bar->finish();
 
         if ($errorCount > 0) {
-            $this->newLine();
-            $this->warn("  ⚠  有 {$errorCount} 個檔案解析失敗（已跳過）");
+            $this->noticeNewLine();
+            $this->noticeWarn("  ⚠  有 {$errorCount} 個檔案解析失敗（已跳過）");
         }
 
         return $callSites;
@@ -343,7 +349,7 @@ class AnalyseQueries extends Command
 
             return $inspector;
         } catch (\Throwable) {
-            $this->warn('  ⚠  無法連線資料庫，索引檢查已停用');
+            $this->noticeWarn('  ⚠  無法連線資料庫，索引檢查已停用');
             return null;
         }
     }
@@ -615,11 +621,65 @@ class AnalyseQueries extends Command
 
     private function printBanner(): void
     {
-        $this->newLine();
-        $this->line('  <fg=white;options=bold>┌──────────────────────────────────────────┐</>');
-        $this->line('  <fg=white;options=bold>│  SQL Monitor — Static Query Analyser     │</>');
-        $this->line('  <fg=white;options=bold>└──────────────────────────────────────────┘</>');
-        $this->newLine();
+        $this->noticeNewLine();
+        $this->noticeLine('  <fg=white;options=bold>┌──────────────────────────────────────────┐</>');
+        $this->noticeLine('  <fg=white;options=bold>│  SQL Monitor — Static Query Analyser     │</>');
+        $this->noticeLine('  <fg=white;options=bold>└──────────────────────────────────────────┘</>');
+        $this->noticeNewLine();
+    }
+
+    // ─── 裝飾輸出路由（JSON 模式導向 stderr，避免污染 stdout）──────────────
+
+    private function notice(string $message): void
+    {
+        $this->noticeLine("<info>{$message}</info>");
+    }
+
+    private function noticeLine(string $message): void
+    {
+        if ($this->jsonMode) {
+            $this->stderrOutput()->writeln($message);
+        } else {
+            $this->line($message);
+        }
+    }
+
+    private function noticeNewLine(): void
+    {
+        if ($this->jsonMode) {
+            $this->stderrOutput()->writeln('');
+        } else {
+            $this->newLine();
+        }
+    }
+
+    private function noticeWarn(string $message): void
+    {
+        $this->noticeLine("<comment>{$message}</comment>");
+    }
+
+    private function noticeError(string $message): void
+    {
+        if ($this->jsonMode) {
+            $this->stderrOutput()->writeln("<error>{$message}</error>");
+        } else {
+            $this->error($message);
+        }
+    }
+
+    private ?\Symfony\Component\Console\Output\OutputInterface $stderrOutput = null;
+
+    private function stderrOutput(): \Symfony\Component\Console\Output\OutputInterface
+    {
+        if ($this->stderrOutput === null) {
+            $this->stderrOutput = new \Symfony\Component\Console\Output\StreamOutput(
+                fopen('php://stderr', 'w'),
+                \Symfony\Component\Console\Output\OutputInterface::VERBOSITY_NORMAL,
+                false // 無色彩，避免寫入檔案時混入 ANSI 碼
+            );
+        }
+
+        return $this->stderrOutput;
     }
 
     /**
