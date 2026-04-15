@@ -122,11 +122,16 @@ class AnalyseQueries extends Command
         // 6. 輸出
         $format = $this->option('format');
 
-        return match ($format) {
+        $exitCode = match ($format) {
             'json'    => $this->outputJson($reports, $recommendations),
             'summary' => $this->outputSummary($reports, $recommendations),
             default   => $this->outputTable($reports, $recommendations),
         };
+
+        // 7. Tee：同步寫入 log 檔（與 terminal 輸出相同內容）
+        $this->writeLogFiles($reports, $recommendations);
+
+        return $exitCode;
     }
 
     // ─── 檔案解析 ──────────────────────────────────────────────
@@ -696,6 +701,232 @@ class AnalyseQueries extends Command
         }
 
         return $this->hasFailures($reports) ? self::FAILURE : self::SUCCESS;
+    }
+
+    // ─── Tee：寫入 log 檔 ─────────────────────────────────────
+
+    /**
+     * 將分析結果與索引建議同步寫入 log 檔（tee 模式）。
+     * 寫檔獨立於 terminal 輸出，失敗時靜默警告，不中斷命令。
+     */
+    private function writeLogFiles(array $reports, array $recommendations): void
+    {
+        $cfg = config('sql-monitor.static_analysis', []);
+
+        $outputPath = $cfg['output_path'] ?? null;
+
+        if ($outputPath === null || $outputPath === '') {
+            return;
+        }
+
+        // 相對路徑以 base_path() 為基準
+        if (! str_starts_with((string) $outputPath, DIRECTORY_SEPARATOR)) {
+            $outputPath = base_path($outputPath);
+        }
+
+        try {
+            if (! is_dir($outputPath)) {
+                mkdir($outputPath, 0755, true);
+            }
+        } catch (\Throwable $e) {
+            $this->noticeWarn("  ⚠  無法建立 log 目錄：{$outputPath} ({$e->getMessage()})");
+            return;
+        }
+
+        $format = $cfg['log_format'] ?? 'text';
+        $date   = now()->format('Y-m-d');
+
+        $analyseFile    = str_replace('{date}', $date, $cfg['analyse_log']    ?? 'analyse-{date}.log');
+        $suggestionFile = str_replace('{date}', $date, $cfg['suggestion_log'] ?? 'suggestion-{date}.log');
+
+        $analysePath    = $outputPath . DIRECTORY_SEPARATOR . $analyseFile;
+        $suggestionPath = $outputPath . DIRECTORY_SEPARATOR . $suggestionFile;
+
+        try {
+            if ($format === 'json') {
+                $this->writeAnalyseLogJson($analysePath, $reports);
+                $this->writeSuggestionLogJson($suggestionPath, $recommendations);
+            } else {
+                $this->writeAnalyseLogText($analysePath, $reports);
+                $this->writeSuggestionLogText($suggestionPath, $recommendations);
+            }
+
+            $this->noticeNewLine();
+            $this->notice("  ✎  分析結果已寫入：{$analysePath}");
+            if (! empty($recommendations)) {
+                $this->notice("  ✎  索引建議已寫入：{$suggestionPath}");
+            }
+        } catch (\Throwable $e) {
+            $this->noticeWarn("  ⚠  寫入 log 失敗：{$e->getMessage()}");
+        }
+    }
+
+    // ── plain text 寫檔 ─────────────────────────────────────
+
+    private function writeAnalyseLogText(string $path, array $reports): void
+    {
+        $minSeverity = $this->option('min-severity') ?? 'info';
+        $lines       = [];
+
+        $lines[] = str_repeat('=', 60);
+        $lines[] = '  SQL Monitor — 靜態分析結果';
+        $lines[] = '  產生時間：' . now()->format('Y-m-d H:i:s');
+        $lines[] = str_repeat('=', 60);
+
+        $grouped = $this->groupByFile($reports);
+
+        foreach ($grouped as $filePath => $fileReports) {
+            $shortPath     = $this->shortenPath($filePath);
+            $headerPrinted = false;
+
+            foreach ($fileReports as $report) {
+                /** @var CallSiteReport $report */
+                $filteredIssues = $report->issuesAbove($minSeverity);
+
+                if (empty($filteredIssues) && $report->severity() !== 'ok') {
+                    continue;
+                }
+
+                if (! $this->meetsSeverity($report->severity(), $minSeverity)) {
+                    continue;
+                }
+
+                if (! $headerPrinted) {
+                    $lines[]       = '';
+                    $lines[]       = "=== {$shortPath}";
+                    $headerPrinted = true;
+                }
+
+                $site     = $report->callSite;
+                $severity = $report->severity();
+                $icon     = self::SEVERITY_ICONS[$severity] ?? '?';
+                $location = $site->className && $site->methodName
+                    ? "{$site->className}::{$site->methodName}()"
+                    : basename($site->filePath);
+
+                $chain = $site->chainSummary();
+                if (strlen($chain) > 100) {
+                    $chain = substr($chain, 0, 97) . '...';
+                }
+
+                $lines[] = '';
+                $lines[] = "  {$icon} {$location}  行 {$site->startLine}";
+                $lines[] = "    {$chain}";
+                $lines[] = "    表：" . ($report->primaryTable ?? '(unknown)')
+                    . "  | 複雜度：{$report->complexityScore}/100 [{$report->complexityLabel()}]"
+                    . "  | 成本：{$report->estimatedCost} [{$report->costLabel()}]";
+
+                foreach ($filteredIssues as $issue) {
+                    $iIcon = self::SEVERITY_ICONS[$issue['severity']] ?? '?';
+                    $lines[] = "    {$iIcon}  [{$issue['code']}] {$issue['message']}";
+                }
+            }
+        }
+
+        $stats   = $this->buildSummaryArray($reports);
+        $lines[] = '';
+        $lines[] = str_repeat('-', 60);
+        $lines[] = '  分析摘要';
+        $lines[] = str_repeat('-', 60);
+        $lines[] = "  查詢總數：  {$stats['total']}";
+        $lines[] = "  Critical：  {$stats['critical']}";
+        $lines[] = "  Warning：   {$stats['warning']}";
+        $lines[] = "  Info：      {$stats['info']}";
+        $lines[] = "  OK：        {$stats['ok']}";
+        $lines[] = "  平均複雜度：{$stats['avg_complexity']}/100";
+        $lines[] = "  平均成本：  {$stats['avg_cost']}";
+        $lines[] = '';
+
+        file_put_contents($path, implode("\n", $lines) . "\n", FILE_APPEND | LOCK_EX);
+    }
+
+    private function writeSuggestionLogText(string $path, array $recommendations): void
+    {
+        if (empty($recommendations)) {
+            return;
+        }
+
+        $lines   = [];
+        $lines[] = str_repeat('=', 60);
+        $lines[] = '  SQL Monitor — 複合索引建議';
+        $lines[] = '  產生時間：' . now()->format('Y-m-d H:i:s');
+        $lines[] = str_repeat('=', 60);
+
+        foreach ($recommendations as $table => $recs) {
+            $totalFreq = array_sum(array_column($recs, 'frequency'));
+            $lines[]   = '';
+            $lines[]   = "  {$table}  (" . count($recs) . " 個建議，共 {$totalFreq} 次查詢覆蓋)";
+
+            foreach ($recs as $i => $rec) {
+                $num     = $i + 1;
+                $columns = implode(', ', $rec['columns']);
+                $freq    = $rec['frequency'];
+
+                $lines[] = '';
+                $lines[] = "    建議 {$num}:  ({$columns})  使用次數：{$freq}";
+
+                foreach ($this->buildRationaleLines($rec) as $line) {
+                    $lines[] = "      → {$line}";
+                }
+
+                if (! empty($rec['replaces'])) {
+                    $replaced = implode(', ', $rec['replaces']);
+                    $lines[]  = "      ⚠  可 DROP 現有索引：{$replaced}（已被新索引 left-prefix 覆蓋）";
+                }
+
+                $firstPattern = $rec['patterns'][0] ?? null;
+                if ($firstPattern && ! empty($firstPattern['sample_locations'])) {
+                    $lines[] = "      例如：" . $firstPattern['sample_locations'][0];
+                }
+            }
+        }
+
+        $lines[] = '';
+        file_put_contents($path, implode("\n", $lines) . "\n", FILE_APPEND | LOCK_EX);
+    }
+
+    // ── JSON 寫檔 ───────────────────────────────────────────
+
+    private function writeAnalyseLogJson(string $path, array $reports): void
+    {
+        $minSeverity = $this->option('min-severity') ?? 'info';
+
+        $data = [
+            'generated_at' => now()->toIso8601String(),
+            'total_sites'  => count($reports),
+            'summary'      => $this->buildSummaryArray($reports),
+            'reports'      => array_map(
+                fn(CallSiteReport $r) => $r->toArray(),
+                array_filter(
+                    $reports,
+                    fn(CallSiteReport $r) => $this->meetsSeverity($r->severity(), $minSeverity)
+                )
+            ),
+        ];
+
+        file_put_contents(
+            $path,
+            json_encode($data, JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE) . "\n",
+            FILE_APPEND | LOCK_EX
+        );
+    }
+
+    private function writeSuggestionLogJson(string $path, array $recommendations): void
+    {
+        if (empty($recommendations)) {
+            return;
+        }
+
+        $data = [
+            'generated_at'          => now()->toIso8601String(),
+            'index_recommendations' => $this->serializeRecommendations($recommendations),
+        ];
+
+        file_put_contents(
+            $path,
+            json_encode($data, JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE) . "\n",
+            FILE_APPEND | LOCK_EX
+        );
     }
 
     // ─── 統計摘要 ──────────────────────────────────────────────

@@ -150,6 +150,35 @@ return [
 
     /*
     |--------------------------------------------------------------------------
+    | 靜態分析輸出
+    |--------------------------------------------------------------------------
+    | sql-monitor:analyse 執行後，同步將結果寫入 log 檔（tee 模式：
+    | 畫面輸出不受影響，同時將同樣內容寫入以下路徑的檔案）。
+    |
+    | output_path：log 檔存放目錄（null = 不寫檔）
+    |   .env: SQL_MONITOR_ANALYSE_OUTPUT_PATH=storage/logs/sql-monitor
+    |
+    | analyse_log：分析結果檔名（支援 {date} 佔位符，每日自動旋轉）
+    |   .env: SQL_MONITOR_ANALYSE_LOG=analyse-{date}.log
+    |
+    | suggestion_log：索引建議檔名
+    |   .env: SQL_MONITOR_SUGGESTION_LOG=suggestion-{date}.log
+    |
+    | log_format：檔案輸出格式（text = 人讀純文字 | json = JSON 格式）
+    |   .env: SQL_MONITOR_ANALYSE_LOG_FORMAT=text
+    |
+    | 注意：output_path 若為相對路徑，將以 base_path() 為基準解析。
+    |       設為 null 或留空則完全跳過寫檔。
+    */
+    'static_analysis' => [
+        'output_path'    => env('SQL_MONITOR_ANALYSE_OUTPUT_PATH', storage_path('logs/sql-monitor')),
+        'analyse_log'    => env('SQL_MONITOR_ANALYSE_LOG',    'analyse-{date}.log'),
+        'suggestion_log' => env('SQL_MONITOR_SUGGESTION_LOG', 'suggestion-{date}.log'),
+        'log_format'     => env('SQL_MONITOR_ANALYSE_LOG_FORMAT', 'text'),
+    ],
+
+    /*
+    |--------------------------------------------------------------------------
     | 路由前綴與中間件
     |--------------------------------------------------------------------------
     */
