@@ -44,8 +44,20 @@ class QueryCallSite
     /** 是否有 orderBy */
     public bool $hasOrderBy = false;
 
+    /**
+     * ORDER BY 欄位清單，每項 [{column, direction}]。
+     * 只包含靜態可解析的欄位（字串常數、非變數、非 raw）。
+     */
+    public array $orderByColumns = [];
+
     /** 是否有 groupBy */
     public bool $hasGroupBy = false;
+
+    /**
+     * GROUP BY 欄位清單（字串陣列）。
+     * 只包含靜態可解析的欄位。
+     */
+    public array $groupByColumns = [];
 
     /** 是否有 limit */
     public bool $hasLimit = false;

@@ -298,10 +298,14 @@ class QueryChainExtractor
 
         if (in_array($method, ['orderBy', 'orderByDesc', 'orderByRaw', 'latest', 'oldest'], true)) {
             $site->hasOrderBy = true;
+            $this->recordOrderByColumn($site, $method, $args);
         }
 
         if (in_array($method, ['groupBy', 'having', 'havingRaw'], true)) {
             $site->hasGroupBy = true;
+            if ($method === 'groupBy') {
+                $this->recordGroupByColumns($site, $args);
+            }
         }
 
         if (in_array($method, ['limit', 'take', 'paginate', 'simplePaginate', 'cursorPaginate'], true)) {
@@ -414,6 +418,56 @@ class QueryChainExtractor
                 foreach ($arg as $value) {
                     if (is_string($value)) {
                         $site->selects[] = $value;
+                    }
+                }
+            }
+        }
+    }
+
+    /**
+     * 記錄 ORDER BY 欄位（僅當可靜態解析時）。
+     * orderBy('col') / orderBy('col', 'desc') / orderByDesc('col') 可記；
+     * orderByRaw / latest() / oldest() 或動態欄位（$var）一律跳過。
+     */
+    private function recordOrderByColumn(QueryCallSite $site, string $method, array $args): void
+    {
+        if ($method === 'orderByRaw' || $method === 'latest' || $method === 'oldest') {
+            return;
+        }
+
+        $column = $args[0] ?? null;
+
+        if (! is_string($column) || $column === '' || str_starts_with($column, '$')) {
+            return;
+        }
+
+        $direction = $method === 'orderByDesc' ? 'desc' : 'asc';
+
+        if ($method === 'orderBy' && isset($args[1]) && is_string($args[1])) {
+            $direction = strtolower($args[1]) === 'desc' ? 'desc' : 'asc';
+        }
+
+        $site->orderByColumns[] = [
+            'column'    => $column,
+            'direction' => $direction,
+        ];
+    }
+
+    /**
+     * 記錄 GROUP BY 欄位（僅當可靜態解析時）。
+     */
+    private function recordGroupByColumns(QueryCallSite $site, array $args): void
+    {
+        foreach ($args as $arg) {
+            if (is_string($arg) && $arg !== '' && ! str_starts_with($arg, '$')) {
+                $site->groupByColumns[] = $arg;
+                continue;
+            }
+
+            if (is_array($arg)) {
+                foreach ($arg as $value) {
+                    if (is_string($value) && $value !== '' && ! str_starts_with($value, '$')) {
+                        $site->groupByColumns[] = $value;
                     }
                 }
             }
