@@ -90,7 +90,7 @@ class IndexInspector
     protected function getMysqlIndexes(string $table): array
     {
         $results = $this->connection->select(
-            "SELECT COLUMN_NAME, INDEX_NAME, UNIQUE(INDEX_NAME) as is_unique
+            "SELECT COLUMN_NAME, INDEX_NAME, (NON_UNIQUE = 0) AS is_unique
              FROM INFORMATION_SCHEMA.STATISTICS
              WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ?
              ORDER BY SEQ_IN_INDEX",
