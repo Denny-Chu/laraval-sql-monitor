@@ -339,17 +339,28 @@ class AnalyseQueries extends Command
 
     /**
      * 嘗試建立 IndexInspector，若資料庫不可用則回傳 null。
+     *
+     * 分兩階段檢查：
+     *   1. 連線測試 (SELECT 1)：判斷連線是否可達
+     *   2. 索引查詢測試：判斷索引查詢 SQL 本身是否可執行
+     * 兩者分開才能避免把 SQL 錯誤誤報為連線錯誤。
      */
     private function makeIndexInspector(): ?IndexInspector
     {
         try {
+            \Illuminate\Support\Facades\DB::connection()->select('SELECT 1');
+        } catch (\Throwable $e) {
+            $this->noticeWarn('  ⚠  無法連線資料庫，索引檢查已停用 (' . $e->getMessage() . ')');
+            return null;
+        }
+
+        try {
             $inspector = new IndexInspector();
-            // 測試連線是否可用
             $inspector->getTableIndexes('__test_connection_ping__');
 
             return $inspector;
-        } catch (\Throwable) {
-            $this->noticeWarn('  ⚠  無法連線資料庫，索引檢查已停用');
+        } catch (\Throwable $e) {
+            $this->noticeWarn('  ⚠  索引檢查初始化失敗，已停用 (' . $e->getMessage() . ')');
             return null;
         }
     }
