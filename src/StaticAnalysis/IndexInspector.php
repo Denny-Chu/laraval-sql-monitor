@@ -17,6 +17,12 @@ class IndexInspector
     /** @var array<string, array<string, array>> 快取 */
     protected array $indexCache = [];
 
+    /** @var array<string, int>  table => row_count 快取 */
+    protected array $rowCountCache = [];
+
+    /** @var array<string, array<string, int>>  table => [column => distinct_count] 快取 */
+    protected array $distinctCountCache = [];
+
     public function __construct(?Connection $connection = null)
     {
         $this->connection = $connection ?? DB::connection();
@@ -196,10 +202,100 @@ class IndexInspector
         return $indexes;
     }
 
+    // ─── 基數 / 選擇率 ────────────────────────────────────
+
+    /**
+     * 取得表的估計列數。
+     * 使用 COUNT(*) 以確保精準（避免 INFORMATION_SCHEMA 的估算誤差）。
+     * 快取結果避免重複查詢。
+     */
+    public function getTableRowCount(string $table): int
+    {
+        if (array_key_exists($table, $this->rowCountCache)) {
+            return $this->rowCountCache[$table];
+        }
+
+        if (! $this->isSafeIdentifier($table)) {
+            return $this->rowCountCache[$table] = 0;
+        }
+
+        try {
+            $row = $this->connection->selectOne(
+                "SELECT COUNT(*) AS cnt FROM `{$table}`"
+            );
+
+            $count = is_object($row) && isset($row->cnt) ? (int) $row->cnt : 0;
+        } catch (\Throwable) {
+            $count = 0;
+        }
+
+        return $this->rowCountCache[$table] = $count;
+    }
+
+    /**
+     * 取得欄位的精準 distinct count。
+     * 使用 COUNT(DISTINCT) — 較慢但精準。
+     * 快取結果避免重複查詢。
+     */
+    public function getColumnDistinctCount(string $table, string $column): int
+    {
+        if (isset($this->distinctCountCache[$table][$column])) {
+            return $this->distinctCountCache[$table][$column];
+        }
+
+        if (! $this->isSafeIdentifier($table) || ! $this->isSafeIdentifier($column)) {
+            return $this->distinctCountCache[$table][$column] = 0;
+        }
+
+        try {
+            $row = $this->connection->selectOne(
+                "SELECT COUNT(DISTINCT `{$column}`) AS cnt FROM `{$table}`"
+            );
+
+            $count = is_object($row) && isset($row->cnt) ? (int) $row->cnt : 0;
+        } catch (\Throwable) {
+            $count = 0;
+        }
+
+        return $this->distinctCountCache[$table][$column] = $count;
+    }
+
+    /**
+     * 計算欄位選擇率：distinct_count / total_rows，範圍 0~1。
+     * 選擇率越接近 1 代表每個值越唯一（越適合放在複合索引的最前面）。
+     *
+     * 回傳 null 代表無法計算（表為空或查詢失敗）。
+     */
+    public function getColumnSelectivity(string $table, string $column): ?float
+    {
+        $rows = $this->getTableRowCount($table);
+
+        if ($rows <= 0) {
+            return null;
+        }
+
+        $distinct = $this->getColumnDistinctCount($table, $column);
+
+        if ($distinct <= 0) {
+            return null;
+        }
+
+        return min(1.0, $distinct / $rows);
+    }
+
     // ─── Helpers ────────────────────────────────────────────
 
     protected function getDatabaseDriver(): string
     {
         return $this->connection->getDriverName();
+    }
+
+    /**
+     * 驗證識別符僅包含安全字元（防止透過 AST 提取的 column/table 名稱注入 SQL）。
+     * 允許字母、數字、底線；必須以字母或底線開頭。
+     */
+    protected function isSafeIdentifier(string $identifier): bool
+    {
+        return (bool) preg_match('/^[a-zA-Z_][a-zA-Z0-9_]*$/', $identifier);
     }
 }
