@@ -10,6 +10,7 @@ use LaravelSqlMonitor\StaticAnalysis\Ast\AstAnalyser;
 use LaravelSqlMonitor\StaticAnalysis\Ast\QueryCallSite;
 use LaravelSqlMonitor\StaticAnalysis\CallSiteAnalyser;
 use LaravelSqlMonitor\StaticAnalysis\CallSiteReport;
+use LaravelSqlMonitor\StaticAnalysis\CompositeIndexRecommender;
 use LaravelSqlMonitor\StaticAnalysis\IndexInspector;
 
 /**
@@ -37,6 +38,7 @@ class AnalyseQueries extends Command
         {--format=table   : 輸出格式：table / json / summary}
         {--min-severity=info : 最低顯示嚴重度：info / warning / critical}
         {--no-index-check : 略過資料庫索引檢查（不需要資料庫連線）}
+        {--no-index-recommend : 略過複合索引建議（避免大表的 COUNT(DISTINCT) 負擔）}
         {--sort=file      : 排序方式：file / cost / complexity / severity}';
 
     protected $description = '靜態分析程式碼中的資料庫查詢，預測執行成本並偵測索引使用問題';
@@ -108,13 +110,22 @@ class AnalyseQueries extends Command
         // 4. 排序
         $reports = $this->sortReports($reports);
 
-        // 5. 輸出
+        // 5. 複合索引建議（需要 inspector；可用 --no-index-recommend 跳過）
+        $recommendations = [];
+        if ($indexInspector !== null && ! $this->option('no-index-recommend')) {
+            $this->noticeNewLine();
+            $this->notice('  計算複合索引建議（逐表 COUNT(DISTINCT)，可能需要時間）...');
+            $recommender     = new CompositeIndexRecommender($indexInspector);
+            $recommendations = $recommender->recommend($reports);
+        }
+
+        // 6. 輸出
         $format = $this->option('format');
 
         return match ($format) {
-            'json'    => $this->outputJson($reports),
-            'summary' => $this->outputSummary($reports),
-            default   => $this->outputTable($reports),
+            'json'    => $this->outputJson($reports, $recommendations),
+            'summary' => $this->outputSummary($reports, $recommendations),
+            default   => $this->outputTable($reports, $recommendations),
         };
     }
 
@@ -392,7 +403,7 @@ class AnalyseQueries extends Command
 
     // ─── 輸出：Table 格式 ─────────────────────────────────────
 
-    private function outputTable(array $reports): int
+    private function outputTable(array $reports, array $recommendations = []): int
     {
         $minSeverity = $this->option('min-severity');
         $displayed   = 0;
@@ -434,10 +445,99 @@ class AnalyseQueries extends Command
             $this->info('  ✓ 所有查詢在指定嚴重度下均無問題。');
         }
 
+        // 索引建議
+        $this->printIndexRecommendations($recommendations);
+
         // 摘要統計
         $this->printSummaryStats($reports);
 
         return $this->hasFailures($reports) ? self::FAILURE : self::SUCCESS;
+    }
+
+    /**
+     * 印出複合索引建議區段。
+     */
+    private function printIndexRecommendations(array $recommendations): void
+    {
+        if (empty($recommendations)) {
+            return;
+        }
+
+        $this->newLine();
+        $this->line('  <fg=white;options=bold>═══ 複合索引建議（按使用頻率排序）</>');
+
+        foreach ($recommendations as $table => $recs) {
+            $totalFreq = array_sum(array_column($recs, 'frequency'));
+            $this->newLine();
+            $this->line("  <fg=white;options=bold>{$table}</> <fg=gray>(" . count($recs) . " 個建議，共 {$totalFreq} 次查詢覆蓋)</>");
+
+            foreach ($recs as $i => $rec) {
+                $num     = $i + 1;
+                $columns = implode(', ', $rec['columns']);
+                $freq    = $rec['frequency'];
+
+                $this->newLine();
+                $this->line("    <fg=cyan>建議 {$num}</> <fg=white;options=bold>({$columns})</> <fg=gray>使用次數：{$freq}</>");
+
+                // 理由
+                $rationale = $this->buildRationaleLines($rec);
+                foreach ($rationale as $line) {
+                    $this->line("      <fg=gray>→</> {$line}");
+                }
+
+                // 取代現有索引
+                if (! empty($rec['replaces'])) {
+                    $replaced = implode(', ', $rec['replaces']);
+                    $this->line("      <fg=yellow>⚠</>  可 DROP 現有索引：<fg=yellow>{$replaced}</> <fg=gray>(已被新索引 left-prefix 覆蓋)</>");
+                }
+
+                // 展示一個代表 pattern 的 sample location
+                $firstPattern = $rec['patterns'][0] ?? null;
+                if ($firstPattern && ! empty($firstPattern['sample_locations'])) {
+                    $sample = $firstPattern['sample_locations'][0];
+                    $this->line("      <fg=gray>例如：{$sample}</>");
+                }
+            }
+        }
+
+        $this->newLine();
+    }
+
+    /**
+     * 為單個建議產生理由描述文字行。
+     */
+    private function buildRationaleLines(array $rec): array
+    {
+        $lines         = [];
+        $selectivities = $rec['selectivities'] ?? [];
+        $rangeCol      = $rec['range_col']     ?? null;
+        $orderCols     = $rec['order_cols']    ?? [];
+
+        // Equality 欄位選擇率說明
+        $eqCols = array_filter($rec['columns'], fn($c) => $c !== $rangeCol && ! in_array($c, array_column($orderCols, 'column'), true));
+        if (! empty($eqCols)) {
+            $parts = [];
+            foreach ($eqCols as $col) {
+                $sel = $selectivities[$col] ?? null;
+                if ($sel === null) {
+                    $parts[] = "{$col}(選擇率未知)";
+                } else {
+                    $parts[] = sprintf("%s(選擇率 %.3f)", $col, $sel);
+                }
+            }
+            $lines[] = '等值欄位依選擇率排序：' . implode(' → ', $parts);
+        }
+
+        if ($rangeCol !== null) {
+            $lines[] = "range 欄位 {$rangeCol} 放在等值欄位之後（MySQL 只能使用一個 range）";
+        }
+
+        if (! empty($orderCols)) {
+            $tail = implode(', ', array_map(fn($o) => "{$o['column']} {$o['direction']}", $orderCols));
+            $lines[] = "ORDER BY 欄位放尾端：{$tail}（可避免 filesort）";
+        }
+
+        return $lines;
     }
 
     /**
@@ -496,15 +596,16 @@ class AnalyseQueries extends Command
 
     // ─── 輸出：JSON 格式 ──────────────────────────────────────
 
-    private function outputJson(array $reports): int
+    private function outputJson(array $reports, array $recommendations = []): int
     {
         $minSeverity = $this->option('min-severity');
 
         $data = [
-            'generated_at' => now()->toIso8601String(),
-            'total_sites'  => count($reports),
-            'summary'      => $this->buildSummaryArray($reports),
-            'reports'      => [],
+            'generated_at'          => now()->toIso8601String(),
+            'total_sites'           => count($reports),
+            'summary'               => $this->buildSummaryArray($reports),
+            'reports'               => [],
+            'index_recommendations' => $this->serializeRecommendations($recommendations),
         ];
 
         foreach ($reports as $report) {
@@ -519,10 +620,45 @@ class AnalyseQueries extends Command
         return $this->hasFailures($reports) ? self::FAILURE : self::SUCCESS;
     }
 
+    /**
+     * 將建議陣列整理成 JSON 序列化友善的結構。
+     */
+    private function serializeRecommendations(array $recommendations): array
+    {
+        $out = [];
+
+        foreach ($recommendations as $table => $recs) {
+            $out[$table] = array_map(
+                fn(array $r) => [
+                    'columns'       => $r['columns'],
+                    'frequency'     => $r['frequency'],
+                    'range_col'     => $r['range_col'] ?? null,
+                    'order_cols'    => $r['order_cols'] ?? [],
+                    'selectivities' => $r['selectivities'] ?? [],
+                    'replaces'      => $r['replaces'] ?? [],
+                    'patterns'      => array_map(
+                        fn(array $p) => [
+                            'eq_cols'          => $p['eq_cols'],
+                            'range_col'        => $p['range_col'],
+                            'order_cols'       => $p['order_cols'] ?? [],
+                            'frequency'        => $p['frequency'],
+                            'sample_locations' => array_slice($p['sample_locations'] ?? [], 0, 3),
+                        ],
+                        $r['patterns'] ?? [],
+                    ),
+                ],
+                $recs,
+            );
+        }
+
+        return $out;
+    }
+
     // ─── 輸出：Summary 格式 ──────────────────────────────────
 
-    private function outputSummary(array $reports): int
+    private function outputSummary(array $reports, array $recommendations = []): int
     {
+        $this->printIndexRecommendations($recommendations);
         $this->printSummaryStats($reports);
 
         // 列出 top 10 最高成本查詢
