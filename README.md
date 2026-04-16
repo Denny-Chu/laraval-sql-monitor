@@ -16,9 +16,11 @@
 |------|------|
 | 實時查詢監控 | 捕獲每條 SQL 及執行時間 |
 | 複雜度評分 | 自動計算查詢複雜度（0–100） |
-| N+1 檢測 | 識別 N+1 查詢模式 |
-| 重複查詢檢測 | 找出完全相同的重複查詢 |
-| Slow Query 追蹤 | 記錄超過閾值的查詢並持久化 |
+| N+1 檢測 | 識別 N+1 查詢模式，代表查詢持久化到 DB |
+| 重複查詢檢測 | 找出完全相同的重複查詢，代表查詢持久化到 DB |
+| Slow Query 追蹤 | 超過閾值即時寫入 DB，Log::warning 同步記錄 |
+| 雙層持久化 | 問題查詢（DB 層）+ 正常查詢（Cache 層，TTL 60s） |
+| Dashboard Polling | 每 5 秒自動拉取，合併顯示 DB + Cache 查詢 |
 | Call Stack 收集 | IDE 可點擊的調用棧 |
 
 ### 靜態分析（執行前）
@@ -182,15 +184,27 @@ return [
     'connections'          => [],   // 空 = 監控所有連線
     'excluded_connections' => [],   // 永遠不監控（storage / IndexInspector 專用連線）
 
-    // 慢查詢持久化 storage
+    // 持久化儲存（DB 層）— 問題查詢（慢查詢 / complexity >= warning / N+1 / duplicate）
     'storage' => [
-        'driver'          => env('SQL_MONITOR_STORAGE_DRIVER', 'sqlite'),
-        // sqlite（推薦）：使用獨立 SQLite 檔案，零迴圈風險
-        // database：寫入指定 MySQL/PostgreSQL 連線（建議用獨立連線）
-        'database'        => env('SQL_MONITOR_STORAGE_DATABASE') ?: null,
-        'connection'      => env('SQL_MONITOR_STORAGE_CONNECTION') ?: null,
+        'driver'          => env('SQL_MONITOR_STORAGE_DRIVER', 'database'),
+        // database（預設）：寫入 Laravel 應用程式的 DB，connection = null 時自動跟隨 database.default
+        // sqlite：使用獨立 SQLite 檔案（完全不影響應用程式 DB）
+        'database'        => env('SQL_MONITOR_STORAGE_DATABASE') ?: null,  // SQLite 路徑（database driver 不需要）
+        'connection'      => env('SQL_MONITOR_STORAGE_CONNECTION') ?: null, // null = database.default
         'table'           => 'sql_monitor_logs',
         'retention_hours' => 24,
+    ],
+
+    // Cache 層 — 正常查詢（info / low），TTL 到期自動消失
+    'memory' => [
+        'enabled'    => true,
+        'ttl'        => (int) env('SQL_MONITOR_MEMORY_TTL', 60),  // 每筆查詢存活秒數
+        'max_buffer' => 500,
+    ],
+
+    // Dashboard 自動拉取間隔
+    'dashboard' => [
+        'polling_interval' => (int) env('SQL_MONITOR_POLLING_INTERVAL', 5),  // 秒
     ],
 
     // 靜態分析 log 輸出（tee 模式）
@@ -208,6 +222,9 @@ return [
     // SQL 複雜度分析
     'complexity' => [
         'enabled'              => true,
+        'persist_severity'     => env('SQL_MONITOR_PERSIST_SEVERITY', 'warning'),
+        // 複雜度達到此等級（含）以上的查詢持久化到 DB 層
+        // 可用值：low | info | warning（預設）| critical
         'join_threshold'       => 5,
         'subquery_depth_limit' => 3,
         'detect_select_star'   => true,
@@ -258,8 +275,21 @@ return [
 # 基本啟用
 SQL_MONITOR_ENABLED=true
 
-# storage（推薦保持 sqlite，不需額外連線）
-SQL_MONITOR_STORAGE_DRIVER=sqlite
+# storage driver（預設 database，使用應用程式的 DB）
+SQL_MONITOR_STORAGE_DRIVER=database
+# SQL_MONITOR_STORAGE_CONNECTION=   # null = database.default（留空即可）
+
+# 若需要獨立 SQLite 檔案（不影響應用程式 DB）
+# SQL_MONITOR_STORAGE_DRIVER=sqlite
+
+# Cache 層 TTL（正常查詢在 Dashboard 的可見時間，秒）
+SQL_MONITOR_MEMORY_TTL=60
+
+# Dashboard polling 間隔（秒）
+SQL_MONITOR_POLLING_INTERVAL=5
+
+# 複雜度持久化閾值（warning = warning + critical 都寫入 DB）
+SQL_MONITOR_PERSIST_SEVERITY=warning
 
 # 靜態分析 log 輸出
 SQL_MONITOR_ANALYSE_OUTPUT_PATH=storage/logs/sql-monitor
@@ -278,25 +308,41 @@ SQL_MONITOR_IDE=vscode
 
 ## 動態分析
 
-套件在 `boot()` 時自動監聽 `QueryExecuted` 事件，無需改動應用程式代碼。
+套件在 `boot()` 時自動完成以下兩件事，**無需改動應用程式代碼**：
+
+1. 監聽 `QueryExecuted` 事件（`QueryListener`）
+2. 將 `QueryMonitoringMiddleware` 自動掛載到所有 HTTP request（全域 Middleware）
+
+#### 持久化邏輯
+
+| 條件 | 寫入目的地 | 時機 |
+|---|---|---|
+| 執行時間 >= `slow_query.threshold_ms` | DB 層 | 即時（QueryListener） |
+| 複雜度 >= `complexity.persist_severity` | DB 層 | 即時（QueryListener） |
+| N+1 pattern 代表查詢 | DB 層 | request 結束（Middleware） |
+| 重複查詢代表查詢 | DB 層 | request 結束（Middleware） |
+| 其餘查詢（info / low） | Cache 層（TTL 60s） | request 結束（Middleware） |
+
+> `sql_monitor_logs` 資料表由套件自動建立（`ensureTableExists`），無需手動執行 migration。
 
 ### Web Dashboard
 
 訪問 `http://localhost:8000/sql-monitor` 查看：
 
-- 查詢摘要與統計
+- 查詢摘要與統計（DB 層歷史 + Cache 層近期，每 5 秒自動更新）
 - N+1 警告面板
 - 重複查詢面板
-- 完整查詢日誌
-- Slow Query 列表
+- 完整查詢日誌（可按 Slow / N+1 / Duplicate / Recent 篩選）
+- 歷史慢查詢列表
 
 ### REST API
 
 ```
-GET  /sql-monitor/api/queries       查詢列表
+GET  /sql-monitor/api/queries       查詢列表（DB 層，支援 is_slow / is_n1 / is_duplicate 等 filter）
 GET  /sql-monitor/api/analytics     分析數據
 GET  /sql-monitor/api/slow-queries  慢查詢
 GET  /sql-monitor/api/stats         統計信息
+GET  /sql-monitor/api/poll          Dashboard polling（DB 層 + Cache 層合併）
 DELETE /sql-monitor/api/logs        清理日誌
 ```
 
