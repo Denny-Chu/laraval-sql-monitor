@@ -111,7 +111,12 @@ class QueryMonitoringMiddleware
         }
 
         // ─── Cache 層：剩餘正常查詢 ───────────────────────────
-        if ($this->memoryStore && config('sql-monitor.memory.enabled', true)) {
+        // 跳過 sql-monitor 自身的 request（polling / dashboard），
+        // 避免監控套件本身產生的 SQL 污染 Cache 層。
+        $routePrefix = config('sql-monitor.route_prefix', 'sql-monitor');
+        $isSelfRequest = $request->is($routePrefix) || $request->is("{$routePrefix}/*");
+
+        if ($this->memoryStore && config('sql-monitor.memory.enabled', true) && ! $isSelfRequest) {
             $remaining = array_filter($allQueries, fn($q) => ! $q->persisted);
             if (! empty($remaining)) {
                 $this->memoryStore->pushBatch(array_values($remaining));
