@@ -26,6 +26,7 @@ use LaravelSqlMonitor\Storage\SqliteQueryStore;
 use LaravelSqlMonitor\Console\Commands\AnalyseQueries;
 use LaravelSqlMonitor\Console\Commands\CleanupQueryLogs;
 use LaravelSqlMonitor\Console\Commands\ExportQueryLogs;
+use LaravelSqlMonitor\Http\Middleware\QueryMonitoringMiddleware;
 
 class SqlMonitorServiceProvider extends ServiceProvider
 {
@@ -143,6 +144,7 @@ class SqlMonitorServiceProvider extends ServiceProvider
         $this->registerViews();
         $this->registerCommands();
         $this->registerEventListeners();
+        $this->registerMiddleware();
     }
 
     // ─── 輔助方法 ──────────────────────────────────────────
@@ -211,5 +213,11 @@ class SqlMonitorServiceProvider extends ServiceProvider
             QueryExecuted::class,
             [QueryListener::class, 'handle']
         );
+    }
+
+    protected function registerMiddleware(): void
+    {
+        $this->app->make(\Illuminate\Contracts\Http\Kernel::class)
+            ->pushMiddleware(QueryMonitoringMiddleware::class);
     }
 }
