@@ -6,10 +6,13 @@ namespace LaravelSqlMonitor\Monitor;
 
 use Illuminate\Support\Facades\Log;
 use LaravelSqlMonitor\Lifecycle\QueryRecord;
-use LaravelSqlMonitor\Storage\Contracts\QueryStoreInterface;
 
 /**
- * Slow Query 追蹤器 — 記錄超過閾值的查詢。
+ * Slow Query 追蹤器 — 記錄超過閾值的查詢（記憶體追蹤 + Log）。
+ *
+ * 持久化已移至 QueryListener 統一負責，此類只保留：
+ *   1. per-request 記憶體追蹤（供 MetricsCollector 讀取當次請求統計）
+ *   2. Log::warning()（寫入 Laravel 日誌）
  */
 class SlowQueryTracker
 {
@@ -17,8 +20,7 @@ class SlowQueryTracker
     protected array $slowQueries = [];
 
     public function __construct(
-        protected float               $thresholdMs,
-        protected ?QueryStoreInterface $store = null,
+        protected float $thresholdMs,
     ) {}
 
     /**
@@ -31,9 +33,6 @@ class SlowQueryTracker
         }
 
         $this->slowQueries[] = $record;
-
-        // 持久化到儲存層
-        $this->store?->persist($record);
 
         // 寫入 Laravel 日誌
         Log::channel(config('logging.default'))

@@ -81,6 +81,17 @@ class ApiController extends Controller
     }
 
     /**
+     * GET /sql-monitor/api/poll
+     * Dashboard Polling — 回傳 DB 層 + Cache 層合併資料。
+     */
+    public function poll(): JsonResponse
+    {
+        return response()->json(
+            $this->metrics->poll()
+        );
+    }
+
+    /**
      * DELETE /sql-monitor/api/logs
      * 清理日誌。
      */

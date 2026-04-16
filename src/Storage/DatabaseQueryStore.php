@@ -22,36 +22,41 @@ class DatabaseQueryStore implements QueryStoreInterface
      */
     protected bool $tableEnsured = false;
 
-    public function __construct(string $connection = 'mysql', string $table = 'sql_monitor_logs')
+    public function __construct(?string $connection = null, string $table = 'sql_monitor_logs')
     {
-        $this->connection = $connection;
+        $this->connection = $connection ?? config('database.default', 'mysql');
         $this->table = $table;
-
-        // 不在 constructor 呼叫 ensureTableExists()
     }
 
     public function persist(QueryRecord $record): void
     {
-        $this->db()->insert([
-            'query_id'            => $record->id,
-            'connection_name'     => $record->connection,
-            'sql'                 => $record->sql,
-            'bindings'            => json_encode($record->bindings),
-            'execution_time_ms'   => $record->executionTimeMs,
-            'normalized_sql'      => $record->normalizedSql,
-            'stack_trace'         => json_encode($record->stackTrace),
-            'complexity_score'    => $record->complexity?->score ?? 0,
-            'complexity_severity' => $record->complexity?->severity ?? 'low',
-            'warnings'            => json_encode($record->complexity?->warnings ?? []),
-            'suggestions'         => json_encode(
-                array_map(fn($s) => $s->toArray(), $record->suggestions)
-            ),
-            'query_type'          => $record->analysis?->queryType ?? 'unknown',
-            'primary_table'       => $record->analysis?->tables[0] ?? null,
-            'is_slow'             => $record->isSlow(config('sql-monitor.slow_query.threshold_ms', 100)),
-            'executed_at'         => date('Y-m-d H:i:s', (int) $record->timestamp),
-            'created_at'          => now()->toDateTimeString(),
-        ]);
+        $this->db()->updateOrInsert(
+            ['query_id' => $record->id],
+            [
+                'connection_name'     => $record->connection,
+                'sql'                 => $record->sql,
+                'bindings'            => json_encode($record->bindings),
+                'execution_time_ms'   => $record->executionTimeMs,
+                'normalized_sql'      => $record->normalizedSql,
+                'stack_trace'         => json_encode($record->stackTrace),
+                'complexity_score'    => $record->complexity?->score ?? 0,
+                'complexity_severity' => $record->complexity?->severity ?? 'low',
+                'warnings'            => json_encode($record->complexity?->warnings ?? []),
+                'suggestions'         => json_encode(
+                    array_map(fn($s) => $s->toArray(), $record->suggestions)
+                ),
+                'query_type'          => $record->analysis?->queryType ?? 'unknown',
+                'primary_table'       => $record->analysis?->tables[0] ?? null,
+                'is_slow'             => $record->isSlow(config('sql-monitor.slow_query.threshold_ms', 100)),
+                'is_n1'               => $record->isN1,
+                'n1_count'            => $record->n1Count,
+                'n1_suggestion'       => $record->n1Suggestion,
+                'is_duplicate'        => $record->isDuplicate,
+                'duplicate_count'     => $record->duplicateCount,
+                'executed_at'         => date('Y-m-d H:i:s', (int) $record->timestamp),
+                'created_at'          => now()->toDateTimeString(),
+            ]
+        );
     }
 
     public function persistBatch(array $records): void
@@ -79,6 +84,14 @@ class DatabaseQueryStore implements QueryStoreInterface
 
         if (isset($filters['table'])) {
             $query->where('primary_table', $filters['table']);
+        }
+
+        if (isset($filters['is_n1'])) {
+            $query->where('is_n1', $filters['is_n1']);
+        }
+
+        if (isset($filters['is_duplicate'])) {
+            $query->where('is_duplicate', $filters['is_duplicate']);
         }
 
         return $query
@@ -113,6 +126,8 @@ class DatabaseQueryStore implements QueryStoreInterface
         return [
             'total'           => (clone $db)->count(),
             'slow_queries'    => (clone $db)->where('is_slow', true)->count(),
+            'n1_queries'      => (clone $db)->where('is_n1', true)->count(),
+            'duplicate_queries' => (clone $db)->where('is_duplicate', true)->count(),
             'avg_time_ms'     => round((float) (clone $db)->avg('execution_time_ms'), 2),
             'max_time_ms'     => round((float) (clone $db)->max('execution_time_ms'), 2),
             'by_type'         => (clone $db)->selectRaw('query_type, COUNT(*) as count')
@@ -127,7 +142,7 @@ class DatabaseQueryStore implements QueryStoreInterface
     protected function db()
     {
         if (! $this->tableEnsured) {
-            $this->tableEnsured = true; // 先設旗標，避免 ensureTableExists 內部再次進入
+            $this->tableEnsured = true;
             $this->ensureTableExists();
         }
 
@@ -158,12 +173,19 @@ class DatabaseQueryStore implements QueryStoreInterface
             $table->string('query_type')->default('unknown');
             $table->string('primary_table')->nullable();
             $table->boolean('is_slow')->default(false);
+            $table->boolean('is_n1')->default(false);
+            $table->unsignedInteger('n1_count')->default(0);
+            $table->text('n1_suggestion')->nullable();
+            $table->boolean('is_duplicate')->default(false);
+            $table->unsignedInteger('duplicate_count')->default(0);
             $table->timestamp('executed_at')->nullable();
             $table->timestamps();
 
             $table->index('executed_at');
             $table->index('execution_time_ms');
             $table->index('is_slow');
+            $table->index('is_n1');
+            $table->index('is_duplicate');
             $table->index('query_type');
         });
     }

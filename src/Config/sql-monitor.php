@@ -50,22 +50,25 @@ return [
 
     /*
     |--------------------------------------------------------------------------
-    | 數據存儲
+    | 數據存儲（DB 層）
     |--------------------------------------------------------------------------
-    | driver = sqlite（預設）：
-    |   使用獨立 SQLite 檔案，完全不影響應用程式 MySQL，零迴圈風險。
+    | 持久化有價值的查詢（慢查詢、complexity >= warning、N+1、重複查詢）。
     |
-    | driver = database（使用既有 MySQL/PostgreSQL 連線）：
-    |   強烈建議在 config/database.php 設定一條獨立連線（如 sql_monitor_mysql），
-    |   並將 connection 指向它，以確保 storage 查詢自動被 QueryListener 過濾。
+    | driver = database（預設）：
+    |   使用 Laravel 應用程式的資料庫連線（MySQL / PostgreSQL / SQLite 等）。
+    |   connection = null 時自動使用 config('database.default')。
+    |   QueryListener 已有 re-entrancy guard，不會因 persist 觸發無限迴圈。
+    |
+    | driver = sqlite：
+    |   使用獨立 SQLite 檔案，完全不影響應用程式資料庫。
     |
     | .env:
-    |   SQL_MONITOR_STORAGE_DRIVER=sqlite       # sqlite | database
-    |   SQL_MONITOR_STORAGE_CONNECTION=         # driver=database 時使用的連線名稱
+    |   SQL_MONITOR_STORAGE_DRIVER=database     # database | sqlite
+    |   SQL_MONITOR_STORAGE_CONNECTION=         # null = 使用 database.default
     |   SQL_MONITOR_STORAGE_DATABASE=           # SQLite 路徑（空 = 預設路徑）
     */
     'storage' => [
-        'driver'          => env('SQL_MONITOR_STORAGE_DRIVER', 'sqlite'),
+        'driver'          => env('SQL_MONITOR_STORAGE_DRIVER', 'database'),
         'database'        => env('SQL_MONITOR_STORAGE_DATABASE') ?: null,
         'connection'      => env('SQL_MONITOR_STORAGE_CONNECTION') ?: null,
         'table'           => 'sql_monitor_logs',
@@ -76,9 +79,15 @@ return [
     |--------------------------------------------------------------------------
     | SQL Statement 複雜度分析
     |--------------------------------------------------------------------------
+    | persist_severity：複雜度達到此等級（含）以上的查詢會被持久化到 DB。
+    |   可用值：low | info | warning | critical
+    |   預設 warning = warning + critical 都會寫入 DB。
+    |
+    | .env: SQL_MONITOR_PERSIST_SEVERITY=warning
     */
     'complexity' => [
         'enabled'              => true,
+        'persist_severity'     => env('SQL_MONITOR_PERSIST_SEVERITY', 'warning'),
         'join_threshold'       => 5,        // JOIN 數量超過此值標記為 warning
         'subquery_depth_limit' => 3,        // 子查詢巢狀深度
         'detect_select_star'   => true,     // 檢測 SELECT *
@@ -103,6 +112,39 @@ return [
     */
     'duplicate_detection' => [
         'enabled' => true,
+    ],
+
+    /*
+    |--------------------------------------------------------------------------
+    | 快取記憶體（Cache 層）
+    |--------------------------------------------------------------------------
+    | info / low 等級的正常查詢存入 Laravel Cache，不寫入資料庫。
+    | 用途：Dashboard 顯示近期活動，TTL 過期後自動消失。
+    |
+    | enabled：是否啟用 Cache 層
+    | ttl：每筆查詢的存活秒數（預設 60 秒）
+    | max_buffer：Cache 中最多保留幾筆查詢
+    |
+    | .env:
+    |   SQL_MONITOR_MEMORY_TTL=60
+    */
+    'memory' => [
+        'enabled'    => true,
+        'ttl'        => (int) env('SQL_MONITOR_MEMORY_TTL', 60),
+        'max_buffer' => 500,
+    ],
+
+    /*
+    |--------------------------------------------------------------------------
+    | Dashboard
+    |--------------------------------------------------------------------------
+    | polling_interval：前端自動拉取資料的間隔（秒），預設 5 秒。
+    |
+    | .env:
+    |   SQL_MONITOR_POLLING_INTERVAL=5
+    */
+    'dashboard' => [
+        'polling_interval' => (int) env('SQL_MONITOR_POLLING_INTERVAL', 5),
     ],
 
     /*

@@ -46,6 +46,24 @@ class QueryRecord
 
         /** 優化建議 */
         public array $suggestions = [],
+
+        /** 是否已寫入 DB（供 Middleware 判斷是否需再次 persist） */
+        public bool $persisted = false,
+
+        /** 是否為 N+1 pattern 的一部分 */
+        public bool $isN1 = false,
+
+        /** N+1 重複次數 */
+        public int $n1Count = 0,
+
+        /** N+1 建議 */
+        public ?string $n1Suggestion = null,
+
+        /** 是否為重複查詢 */
+        public bool $isDuplicate = false,
+
+        /** 重複次數 */
+        public int $duplicateCount = 0,
     ) {}
 
     /**
@@ -113,6 +131,11 @@ class QueryRecord
             'analysis'          => $this->analysis?->toArray(),
             'complexity'        => $this->complexity?->toArray(),
             'suggestions'       => array_map(fn(Suggestion $s) => $s->toArray(), $this->suggestions),
+            'is_n1'             => $this->isN1,
+            'n1_count'          => $this->n1Count,
+            'n1_suggestion'     => $this->n1Suggestion,
+            'is_duplicate'      => $this->isDuplicate,
+            'duplicate_count'   => $this->duplicateCount,
         ];
     }
 }

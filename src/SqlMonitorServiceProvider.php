@@ -21,6 +21,7 @@ use LaravelSqlMonitor\Monitor\MetricsCollector;
 use LaravelSqlMonitor\Exceptions\MonitorException;
 use LaravelSqlMonitor\Storage\Contracts\QueryStoreInterface;
 use LaravelSqlMonitor\Storage\DatabaseQueryStore;
+use LaravelSqlMonitor\Storage\MemoryQueryStore;
 use LaravelSqlMonitor\Storage\SqliteQueryStore;
 use LaravelSqlMonitor\Console\Commands\AnalyseQueries;
 use LaravelSqlMonitor\Console\Commands\CleanupQueryLogs;
@@ -66,7 +67,7 @@ class SqlMonitorServiceProvider extends ServiceProvider
 
         // ─── Storage 服務 ──────────────────────────────────
         $this->app->singleton(QueryStoreInterface::class, function () {
-            $driver = config('sql-monitor.storage.driver', 'sqlite');
+            $driver = config('sql-monitor.storage.driver', 'database');
 
             if ($driver === 'sqlite') {
                 return new SqliteQueryStore(
@@ -76,7 +77,7 @@ class SqlMonitorServiceProvider extends ServiceProvider
 
             if ($driver === 'database') {
                 return new DatabaseQueryStore(
-                    connection: config('sql-monitor.storage.connection', config('database.default', 'mysql')),
+                    connection: config('sql-monitor.storage.connection') ?: config('database.default', 'mysql'),
                     table: config('sql-monitor.storage.table', 'sql_monitor_logs')
                 );
             }
@@ -84,11 +85,18 @@ class SqlMonitorServiceProvider extends ServiceProvider
             throw MonitorException::storageError("Unsupported storage driver [{$driver}]. Supported drivers: sqlite, database.");
         });
 
+        // ─── MemoryQueryStore（Cache 層）─────────────────────
+        $this->app->singleton(MemoryQueryStore::class, function () {
+            return new MemoryQueryStore(
+                ttlSeconds: (int) config('sql-monitor.memory.ttl', 60),
+                maxBuffer:  (int) config('sql-monitor.memory.max_buffer', 500),
+            );
+        });
+
         // ─── Monitor 服務 ──────────────────────────────────
-        $this->app->singleton(SlowQueryTracker::class, function ($app) {
+        $this->app->singleton(SlowQueryTracker::class, function () {
             return new SlowQueryTracker(
                 thresholdMs: (float) config('sql-monitor.slow_query.threshold_ms', 100),
-                store:       $app->make(QueryStoreInterface::class),
             );
         });
 
@@ -100,15 +108,28 @@ class SqlMonitorServiceProvider extends ServiceProvider
 
         $this->app->singleton(MetricsCollector::class, function ($app) {
             return new MetricsCollector(
-                manager:     $app->make(RequestQueryManager::class),
-                n1Detector:  $app->make(N1QueryDetector::class),
-                dupDetector: $app->make(DuplicateQueryDetector::class),
-                slowTracker: $app->make(SlowQueryTracker::class),
+                manager:      $app->make(RequestQueryManager::class),
+                n1Detector:   $app->make(N1QueryDetector::class),
+                dupDetector:  $app->make(DuplicateQueryDetector::class),
+                slowTracker:  $app->make(SlowQueryTracker::class),
+                store:        $app->make(QueryStoreInterface::class),
+                memoryStore:  $app->make(MemoryQueryStore::class),
             );
         });
 
         // ─── QueryListener ─────────────────────────────────
-        $this->app->singleton(QueryListener::class);
+        $this->app->singleton(QueryListener::class, function ($app) {
+            return new QueryListener(
+                analyzer:           $app->make(QueryAnalyzer::class),
+                complexityDetector: $app->make(ComplexityDetector::class),
+                suggester:          $app->make(OptimizationSuggester::class),
+                traceCollector:     $app->make(StackTraceCollector::class),
+                manager:            $app->make(RequestQueryManager::class),
+                slowTracker:        $app->make(SlowQueryTracker::class),
+                liveMonitor:        $app->make(LiveQueryMonitor::class),
+                store:              $app->make(QueryStoreInterface::class),
+            );
+        });
     }
 
     public function boot(): void
