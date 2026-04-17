@@ -52,7 +52,7 @@
 @section('scripts')
 <script>
 (function() {
-    const POLL_URL      = '{{ route("sql-monitor.api.poll") }}';
+    const POLL_URL      = '{{ parse_url(route("sql-monitor.api.poll"), PHP_URL_PATH) }}';
     const POLL_INTERVAL = {{ config('sql-monitor.dashboard.polling_interval', 5) }} * 1000;
 
     let currentFilter = 'all';
