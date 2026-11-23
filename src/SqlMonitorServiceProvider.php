@@ -91,6 +91,7 @@ class SqlMonitorServiceProvider extends ServiceProvider
         $this->app->singleton(LiveQueryMonitor::class, function () {
             return new LiveQueryMonitor(
                 channel: config('sql-monitor.live_monitor.broadcast_channel', 'sql-monitor'),
+                enabled: (bool) config('sql-monitor.live_monitor.enabled', false),
             );
         });
 

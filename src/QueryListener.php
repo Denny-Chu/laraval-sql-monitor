@@ -137,7 +137,7 @@ class QueryListener
             }
 
             // ─── 6. 即時廣播 ───────────────────────────────────
-            if (config('sql-monitor.live_monitor.enabled', true)) {
+            if (config('sql-monitor.live_monitor.enabled', false)) {
                 try {
                     $this->liveMonitor->broadcastQuery($record);
                 } catch (\Throwable) {

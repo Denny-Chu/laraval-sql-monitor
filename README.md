@@ -249,9 +249,9 @@ return [
         'threshold_ms' => (int) env('SQL_MONITOR_SLOW_QUERY_THRESHOLD_MS', 100),
     ],
 
-    // WebSocket 即時推送
+    // WebSocket 即時推送（Dashboard 走 polling，預設關閉；BROADCAST_CONNECTION=log 時開啟會把每次廣播寫進日誌）
     'live_monitor' => [
-        'enabled'           => true,
+        'enabled'           => (bool) env('SQL_MONITOR_LIVE_ENABLED', false),
         'broadcast_channel' => 'sql-monitor',
         'max_buffer_size'   => 1000,
     ],
@@ -287,6 +287,9 @@ SQL_MONITOR_MEMORY_TTL=60
 
 # Dashboard polling 間隔（秒）
 SQL_MONITOR_POLLING_INTERVAL=5
+
+# WebSocket 即時廣播（預設關閉；Dashboard 不需要）
+# SQL_MONITOR_LIVE_ENABLED=false
 
 # 複雜度持久化閾值（warning = warning + critical 都寫入 DB）
 SQL_MONITOR_PERSIST_SEVERITY=warning

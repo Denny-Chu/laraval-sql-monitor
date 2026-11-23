@@ -18,8 +18,9 @@ use LaravelSqlMonitor\Lifecycle\QueryRecord;
  * Events 本身為純資料容器（不實作 ShouldBroadcastNow），
  * 廣播統一由此類管理，確保：
  *  1. 廣播失敗不影響 QueryListener 的 re-entrancy 防護。
- *  2. 廣播只在 live_monitor.enabled = true 且 driver 可用時執行。
+ *  2. 廣播只在 live_monitor.enabled = true 時執行（預設關閉：Dashboard 走 HTTP polling，不需要廣播）。
  *
+ * Laravel Event 不受 enabled 影響，照常 dispatch 供應用程式自行監聽。
  * 前端可透過 Laravel Echo 監聽 WebSocket 頻道接收即時更新。
  */
 class LiveQueryMonitor
@@ -28,6 +29,7 @@ class LiveQueryMonitor
 
     public function __construct(
         protected string $channel = 'sql-monitor',
+        protected bool $enabled = false,
     ) {}
 
     /**
@@ -128,6 +130,10 @@ class LiveQueryMonitor
      */
     protected function broadcastRaw(string $event, array $data): void
     {
+        if (! $this->enabled) {
+            return;
+        }
+
         Broadcast::on(new Channel($this->channel))
             ->as($event)
             ->with($data)

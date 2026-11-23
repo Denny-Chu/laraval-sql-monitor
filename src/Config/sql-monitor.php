@@ -164,9 +164,14 @@ return [
     |--------------------------------------------------------------------------
     | Live Query Monitor（WebSocket 即時推送）
     |--------------------------------------------------------------------------
+    | Dashboard 走 HTTP polling，不需要廣播；預設關閉。
+    | 有接 WebSocket（Reverb／Pusher）且要即時推送時才打開。
+    | 注意：BROADCAST_CONNECTION=log 時每次廣播都會寫進 Laravel 日誌。
+    |
+    | .env: SQL_MONITOR_LIVE_ENABLED=false
     */
     'live_monitor' => [
-        'enabled'           => true,
+        'enabled'           => (bool) env('SQL_MONITOR_LIVE_ENABLED', false),
         'broadcast_channel' => 'sql-monitor',
         'max_buffer_size'   => 1000,        // 單次請求最大收集數量
     ],
