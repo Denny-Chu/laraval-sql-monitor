@@ -325,6 +325,8 @@ SQL_MONITOR_IDE=vscode
 
 > `sql_monitor_logs` 資料表由套件自動建立（`ensureTableExists`），無需手動執行 migration。
 
+> 寫入 DB 層是盡力而為：存儲連線是 MySQL／MariaDB 時，`sql`、`bindings` 等 TEXT 欄位超過 65,535 bytes 會截斷並在尾端標記 `[sql-monitor truncated: N bytes]`；寫入本身失敗（連線錯誤、欄位不符等）只寫一筆 warning log 並略過該紀錄，不會讓被監控的查詢或 request 跟著失敗。唯一例外：存儲與應用程式共用連線且正在交易中時，deadlock 這類會讓資料庫回滾整筆交易的錯誤會照常拋出，交給應用程式的交易處理。
+
 ### Web Dashboard
 
 訪問 `http://localhost:8000/sql-monitor` 查看：

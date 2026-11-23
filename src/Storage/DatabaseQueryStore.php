@@ -6,6 +6,7 @@ namespace LaravelSqlMonitor\Storage;
 
 use Illuminate\Support\Facades\DB;
 use LaravelSqlMonitor\Lifecycle\QueryRecord;
+use LaravelSqlMonitor\Storage\Concerns\BuildsQueryLogRow;
 use LaravelSqlMonitor\Storage\Contracts\QueryStoreInterface;
 
 /**
@@ -13,6 +14,8 @@ use LaravelSqlMonitor\Storage\Contracts\QueryStoreInterface;
  */
 class DatabaseQueryStore implements QueryStoreInterface
 {
+    use BuildsQueryLogRow;
+
     protected string $connection;
     protected string $table;
 
@@ -30,33 +33,14 @@ class DatabaseQueryStore implements QueryStoreInterface
 
     public function persist(QueryRecord $record): void
     {
-        $this->db()->updateOrInsert(
-            ['query_id' => $record->id],
-            [
-                'connection_name'     => $record->connection,
-                'sql'                 => $record->sql,
-                'bindings'            => json_encode($record->bindings),
-                'execution_time_ms'   => $record->executionTimeMs,
-                'normalized_sql'      => $record->normalizedSql,
-                'stack_trace'         => json_encode($record->stackTrace),
-                'complexity_score'    => $record->complexity?->score ?? 0,
-                'complexity_severity' => $record->complexity?->severity ?? 'low',
-                'warnings'            => json_encode($record->complexity?->warnings ?? []),
-                'suggestions'         => json_encode(
-                    array_map(fn($s) => $s->toArray(), $record->suggestions)
-                ),
-                'query_type'          => $record->analysis?->queryType ?? 'unknown',
-                'primary_table'       => $record->analysis?->tables[0] ?? null,
-                'is_slow'             => $record->isSlow(config('sql-monitor.slow_query.threshold_ms', 100)),
-                'is_n1'               => $record->isN1,
-                'n1_count'            => $record->n1Count,
-                'n1_suggestion'       => $record->n1Suggestion,
-                'is_duplicate'        => $record->isDuplicate,
-                'duplicate_count'     => $record->duplicateCount,
-                'executed_at'         => date('Y-m-d H:i:s', (int) $record->timestamp),
-                'created_at'          => now()->toDateTimeString(),
-            ]
-        );
+        $this->db()->updateOrInsert(['query_id' => $record->id], $this->toRow($record));
+    }
+
+    protected function maxTextBytes(): ?int
+    {
+        $driver = DB::connection($this->connection)->getDriverName();
+
+        return in_array($driver, ['mysql', 'mariadb'], true) ? TextColumn::MAX_BYTES : null;
     }
 
     public function persistBatch(array $records): void

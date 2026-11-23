@@ -21,12 +21,14 @@ use LaravelSqlMonitor\Monitor\MetricsCollector;
 use LaravelSqlMonitor\Exceptions\MonitorException;
 use LaravelSqlMonitor\Storage\Contracts\QueryStoreInterface;
 use LaravelSqlMonitor\Storage\DatabaseQueryStore;
+use LaravelSqlMonitor\Storage\GuardedQueryStore;
 use LaravelSqlMonitor\Storage\MemoryQueryStore;
 use LaravelSqlMonitor\Storage\SqliteQueryStore;
 use LaravelSqlMonitor\Console\Commands\AnalyseQueries;
 use LaravelSqlMonitor\Console\Commands\CleanupQueryLogs;
 use LaravelSqlMonitor\Console\Commands\ExportQueryLogs;
 use LaravelSqlMonitor\Http\Middleware\QueryMonitoringMiddleware;
+use Psr\Log\LoggerInterface;
 
 class SqlMonitorServiceProvider extends ServiceProvider
 {
@@ -67,23 +69,8 @@ class SqlMonitorServiceProvider extends ServiceProvider
         $this->app->singleton(DuplicateQueryDetector::class);
 
         // ─── Storage 服務 ──────────────────────────────────
-        $this->app->singleton(QueryStoreInterface::class, function () {
-            $driver = config('sql-monitor.storage.driver', 'database');
-
-            if ($driver === 'sqlite') {
-                return new SqliteQueryStore(
-                    config('sql-monitor.storage.database')
-                );
-            }
-
-            if ($driver === 'database') {
-                return new DatabaseQueryStore(
-                    connection: config('sql-monitor.storage.connection') ?: config('database.default', 'mysql'),
-                    table: config('sql-monitor.storage.table', 'sql_monitor_logs')
-                );
-            }
-
-            throw MonitorException::storageError("Unsupported storage driver [{$driver}]. Supported drivers: sqlite, database.");
+        $this->app->singleton(QueryStoreInterface::class, function ($app) {
+            return new GuardedQueryStore($this->makePersistentStore(), $app->make(LoggerInterface::class), $app->make('db'));
         });
 
         // ─── MemoryQueryStore（Cache 層）─────────────────────
@@ -148,6 +135,26 @@ class SqlMonitorServiceProvider extends ServiceProvider
     }
 
     // ─── 輔助方法 ──────────────────────────────────────────
+
+    protected function makePersistentStore(): QueryStoreInterface
+    {
+        $driver = config('sql-monitor.storage.driver', 'database');
+
+        if ($driver === 'sqlite') {
+            return new SqliteQueryStore(
+                config('sql-monitor.storage.database')
+            );
+        }
+
+        if ($driver === 'database') {
+            return new DatabaseQueryStore(
+                connection: config('sql-monitor.storage.connection') ?: config('database.default', 'mysql'),
+                table: config('sql-monitor.storage.table', 'sql_monitor_logs')
+            );
+        }
+
+        throw MonitorException::storageError("Unsupported storage driver [{$driver}]. Supported drivers: sqlite, database.");
+    }
 
     protected function shouldRun(): bool
     {
